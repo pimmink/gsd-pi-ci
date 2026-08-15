@@ -49,8 +49,9 @@ In this exact order, on `ubuntu-24.04`:
 7. `pnpm run test:compile`.
 8. Mirror the built native addon into `dist-test/native/addon/` — the exact step
    `scripts/verify-merge.sh` currently omits.
-9. `pnpm run test:unit:compiled` with `GSD_NATIVE_PREFER_LOCAL=1` and an isolated,
-   job-scoped `GSD_HOME`.
+9. `pnpm run test:unit:compiled` with `GSD_NATIVE_PREFER_LOCAL=1`, using the
+   GitHub-hosted runner's own default `$HOME` (already fresh and per-run isolated —
+   no separate `GSD_HOME` override; see "Security model" for why).
 10. `pnpm run gate:lifecycle-shadow-no-cutover`, same env.
 
 Every command and env flag above is copied verbatim from `pimmink/gsd-pi`'s own
@@ -83,9 +84,19 @@ improvised alternative test pipeline.
 - `concurrency` is grouped per `source_ref` with `cancel-in-progress: true`, so
   re-dispatching against the same branch cancels a stale in-flight run.
 - A hard `timeout-minutes: 60` bounds the job.
-- Tests run against an isolated, job-scoped `GSD_HOME` (`$RUNNER_TEMP/gsd-home`) so no
-  run ever touches real local state — this reuses `pimmink/gsd-pi`'s own existing
-  `GSD_HOME` override mechanism, not a new one.
+- No `GSD_HOME` override: an earlier revision pointed `GSD_HOME` at a second,
+  job-scoped temp directory (`$RUNNER_TEMP/gsd-home`), separate from the runner's own
+  `$HOME`. That diverged from what several upstream tests (`doctor-providers`,
+  `app-smoke`, `rtk`) actually assert about `$HOME`-derived paths, causing 7 false-
+  positive failures on the first real run. The GitHub-hosted runner's own `$HOME` is
+  already a fresh, per-run-isolated filesystem, so no run ever touches real local
+  state regardless — a second override was redundant and actively wrong.
+- Every `run:` step executes as `bash --noprofile --norc -eo pipefail` (job-level
+  `defaults.run.shell: bash`), so a real failure inside a piped command (e.g.
+  `pnpm run test:unit:compiled 2>&1 | tee ...`) fails the step closed on `pnpm`'s exit
+  code, not silently succeeds on `tee`'s. GitHub's implicit default shell (no `shell:`
+  key at all) omits `pipefail`, which let the first real run's 9 real unit-test
+  failures report as a green step/run — fixed by this explicit default.
 - The Rust build cache uses its own namespaced key
   (`gsd-pi-ci-remote-pr-native-linux-x64-gnu`), distinct from `pimmink/gsd-pi ci.yml`'s
   own `native-linux-x64-gnu` key, so the two workflows can never cross-contaminate each
@@ -123,3 +134,20 @@ go-ahead in the future:
 
 See the accompanying session plan for the exact proposed `Ship.` command that would
 authorize the minimal first slice of these (repo creation + push + one dispatch).
+
+## First cold run (run 31854731553, 2026-08-15)
+
+- Total workflow duration: 20m56s (dispatch to completion; ~5s queue wait).
+- Unit-test step (`test:unit:compiled`) alone: ~15m31s.
+- Native addon build/staging worked as designed; the compiled-test loader found the
+  mirrored `.node` addon with no gap.
+- No timeout or resource-exhaustion signals of any kind (contrast with the local
+  laptop `verify:pr` run in the same session, which hit several 60s `ETIMEDOUT`
+  fault-harness timeouts under local resource contention).
+- Reported as green, but was formally invalid: 9 real unit-test failures were masked
+  by the missing-`pipefail` bug described above (fixed in this revision), and 7 of
+  those 9 were caused by the now-removed `GSD_HOME` override.
+- Sharding is still not implemented and still not being designed. This single
+  unsharded run comfortably fits the 60-minute job timeout, so a second, cache-warm,
+  actually-valid (post-fix) run's wall-clock time should be measured before any
+  sharding decision — not this cold, invalid run alone.

@@ -34,6 +34,17 @@ Do not start phase 2 work until at least one real, measured run of
 wall-clock time (and pass/fail outcome) has been recorded. That measurement is the
 input phase 2 needs to decide:
 
+### First cold run recorded (run 31854731553, 2026-08-15) — not sufficient on its own
+
+- Total workflow duration: 20m56s; unit-test step alone: ~15m31s.
+- Native addon build/staging worked correctly.
+- No timeout- or resource-exhaustion signals.
+- This run was formally invalid (masked test failures via a missing `pipefail`, plus
+  7 false-positive failures from a since-removed `GSD_HOME` override) — both fixed in
+  a follow-up revision. Do not use this run's numbers alone to decide sharding; wait
+  for a second, cache-warm, actually-valid run's measurement first, since a cold run
+  (empty Rust/pnpm caches) is not representative of steady-state wall-clock time.
+
 1. Whether a `merge`-parity tier is even feasible/worthwhile on a single unsharded
    runner, or whether sharding must be designed first to keep it inside a reasonable
    timeout.

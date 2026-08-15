@@ -41,6 +41,12 @@ jobs:
     name: pr-verify
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    # Explicit shell: bash (here and per-step) runs as `bash --noprofile --norc -eo pipefail`,
+    # so any `... | tee ...` pipeline below fails closed on the real command's exit code,
+    # not tee's. Without this, GitHub's implicit default shell omits `pipefail`.
+    defaults:
+      run:
+        shell: bash
     steps:
       # Cheapest possible fail-fast: a ls-remote is a ref->sha lookup with no object
       # transfer at all, so a stale/mismatched ref/sha pair never touches a single
@@ -185,19 +191,19 @@ jobs:
           cp "${addons[@]}" dist-test/native/addon/
           ls -la dist-test/native/addon/
 
-      - name: Prepare isolated GSD_HOME
-        run: mkdir -p "${RUNNER_TEMP}/gsd-home"
-
+      # No GSD_HOME override: the GitHub-hosted runner's own $HOME is already a fresh,
+      # per-run-isolated temp filesystem, so production code that reads $HOME (e.g. the
+      # doctor-providers auth.json lookup, app-paths, RTK env setup) sees the same real
+      # default path shape the tests themselves expect, instead of a second, divergent
+      # temp root nothing but this harness ever pointed GSD_HOME at.
       - name: Run unit tests
         env:
           GSD_NATIVE_PREFER_LOCAL: '1'
-          GSD_HOME: ${{ runner.temp }}/gsd-home
         run: pnpm run test:unit:compiled 2>&1 | tee "${RUNNER_TEMP}/test-unit-compiled.log"
 
       - name: Run lifecycle shadow gate
         env:
           GSD_NATIVE_PREFER_LOCAL: '1'
-          GSD_HOME: ${{ runner.temp }}/gsd-home
         run: pnpm run gate:lifecycle-shadow-no-cutover 2>&1 | tee "${RUNNER_TEMP}/lifecycle-shadow-gate.log"
 
       - name: Write job summary
