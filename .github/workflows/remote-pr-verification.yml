@@ -1,0 +1,231 @@
+# gsd-pi-ci: remote `pr`-tier verification harness for pimmink/gsd-pi.
+#
+# Phase-1 MVP. Manually dispatched only (no push/pull_request triggers, ever).
+# Checks out one exact, already-pushed commit of pimmink/gsd-pi and runs the same
+# scope as that repo's local `verify:pr` (build:core + typecheck:extensions +
+# test:unit + lifecycle-shadow gate), plus the native test-engine build/staging step
+# that pimmink/gsd-pi's scripts/verify-merge.sh currently omits (see
+# open-gsd/gsd-pi#1582 for the underlying native-engine-staging gap this mirrors).
+#
+# Explicitly out of scope for this MVP: a remote `targeted` tier (targeted tests and
+# typecheck stay local), a `merge`-parity tier (upstream CI also runs
+# windows-portability/node22-smoke/docker-e2e jobs this harness does not reproduce
+# yet), sharding, Codespaces, and any Copilot cloud agent usage. See
+# docs/phase-2-deferral.md for why and what would need to change first.
+name: Remote PR verification (gsd-pi)
+
+"on":
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Branch in pimmink/gsd-pi to verify (e.g. fix/my-branch)'
+        required: true
+        type: string
+      expected_sha:
+        description: 'Full 40-character commit SHA that source_ref must resolve to'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_REPO: pimmink/gsd-pi
+
+concurrency:
+  group: gsd-pi-remote-pr-verification-${{ inputs.source_ref }}
+  cancel-in-progress: true
+
+jobs:
+  pr-verify:
+    name: pr-verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      # Cheapest possible fail-fast: a ls-remote is a ref->sha lookup with no object
+      # transfer at all, so a stale/mismatched ref/sha pair never touches a single
+      # repository object, let alone runs install/build.
+      - name: Verify source_ref resolves to expected_sha (before touching any objects)
+        shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          # Hardcoded, not derived from any input; the only repository this harness ever contacts.
+          repo_url="https://github.com/pimmink/gsd-pi.git"
+
+          if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::expected_sha must be exactly 40 lowercase hexadecimal characters, got: $EXPECTED_SHA"
+            exit 1
+          fi
+
+          if [[ -z "$SOURCE_REF" || "$SOURCE_REF" == -* || "$SOURCE_REF" == refs/* ]]; then
+            echo "::error::source_ref must be a plain branch name, not an option or full ref"
+            exit 1
+          fi
+
+          if ! git check-ref-format --branch "$SOURCE_REF" >/dev/null; then
+            echo "::error::source_ref is not a valid Git branch name"
+            exit 1
+          fi
+
+          # We construct the ref ourselves; source_ref is only ever used as the leaf
+          # branch name, never as a caller-supplied ref path.
+          target_ref="refs/heads/${SOURCE_REF}"
+
+          remote_matches="$(git ls-remote "$repo_url" "$target_ref")"
+          match_count="$(printf '%s\n' "$remote_matches" | grep -c .)" || match_count=0
+          if [[ "$match_count" -ne 1 ]]; then
+            echo "::error::Expected exactly one match for ${target_ref} on ${repo_url}, found ${match_count}."
+            exit 1
+          fi
+          remote_sha="$(printf '%s\n' "$remote_matches" | cut -f1)"
+
+          if [[ "$remote_sha" != "$EXPECTED_SHA" ]]; then
+            echo "::error::${target_ref} on ${repo_url} currently points at ${remote_sha}, not the expected ${EXPECTED_SHA}. Stopping before checkout."
+            exit 1
+          fi
+          echo "Pre-checkout check passed: ${target_ref} == ${EXPECTED_SHA}"
+
+      # Mirrors upstream ci.yml's own "Checkout repository without GITHUB_TOKEN" step
+      # (same git init/remote add/fetch/checkout --force --detach shape), retargeted at
+      # a specific commit SHA in a different public repo instead of GITHUB_SHA in the
+      # same repo. No actions/checkout, no token, nothing to persist: this exceeds a
+      # bare `persist-credentials: false` by never invoking a credential at all.
+      - name: Checkout exact commit without a token (public repo, read-only)
+        shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          repo_url="https://github.com/pimmink/gsd-pi.git"
+          target_ref="refs/heads/${SOURCE_REF}"
+
+          git init "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "$repo_url"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git -c protocol.version=2 fetch --no-tags --prune --depth=1 origin \
+            "+${target_ref}:refs/checkout-ref"
+          git checkout --force --detach refs/checkout-ref
+
+      # Defense in depth: the checkout above fetches by branch ref, not by SHA, so
+      # this is the step that actually fails the job closed if the branch moved
+      # between the pre-checkout ls-remote and this fetch.
+      - name: Assert HEAD matches expected_sha (fail closed)
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          head_sha="$(git rev-parse HEAD)"
+          if [[ "$head_sha" != "$EXPECTED_SHA" ]]; then
+            echo "::error::HEAD is ${head_sha}, expected ${EXPECTED_SHA}. Stopping."
+            exit 1
+          fi
+          echo "HEAD verified: ${head_sha}"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0 (pinned, reused from gsd-pi's ci.yml)
+        with:
+          version: 10.12.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      # Same env flags gsd-pi's own ci.yml build job uses for this exact install.
+      - name: Install dependencies
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          GSD_SKIP_RTK_INSTALL: '1'
+          GSD_SKIP_DEP_REPAIR: '1'
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Rust toolchain (native addon for tests)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (pinned, reused from gsd-pi's ci.yml)
+
+      - name: Cache Rust build (native addon)
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (pinned, reused from gsd-pi's ci.yml)
+        with:
+          # Own namespace: must never collide with gsd-pi ci.yml's own "native-linux-x64-gnu" key.
+          shared-key: gsd-pi-ci-remote-pr-native-linux-x64-gnu
+          workspaces: native -> target
+
+      - name: Build native addon from source (test parity, dev + fault-injection profile)
+        env:
+          # Portable baseline for the shared runner fleet, same override gsd-pi's
+          # ci.yml build job applies for the same reason (native/.cargo/config.toml
+          # bakes host-specific CPU instructions into dev builds otherwise).
+          RUSTFLAGS: '-C target-cpu=x86-64'
+        run: pnpm run build:native:test
+
+      - name: Build core
+        run: pnpm run build:core
+
+      - name: Typecheck extensions
+        run: pnpm run typecheck:extensions
+
+      - name: Compile test artifacts
+        run: pnpm run test:compile
+
+      # The exact staging step scripts/verify-merge.sh omits (root cause of
+      # open-gsd/gsd-pi#1582's ~140 local failures on a fresh checkout). Runs after
+      # test:compile, matching the compiled-test loader's expected layout.
+      - name: Mirror native addon into dist-test (compiled-test loader path)
+        run: |
+          mkdir -p dist-test/native/addon
+          shopt -s nullglob
+          addons=(native/addon/*.node)
+          if [[ ${#addons[@]} -eq 0 ]]; then
+            echo "::error::No compiled .node addon found under native/addon/ - native build did not produce an addon."
+            exit 1
+          fi
+          cp "${addons[@]}" dist-test/native/addon/
+          ls -la dist-test/native/addon/
+
+      - name: Prepare isolated GSD_HOME
+        run: mkdir -p "${RUNNER_TEMP}/gsd-home"
+
+      - name: Run unit tests
+        env:
+          GSD_NATIVE_PREFER_LOCAL: '1'
+          GSD_HOME: ${{ runner.temp }}/gsd-home
+        run: pnpm run test:unit:compiled 2>&1 | tee "${RUNNER_TEMP}/test-unit-compiled.log"
+
+      - name: Run lifecycle shadow gate
+        env:
+          GSD_NATIVE_PREFER_LOCAL: '1'
+          GSD_HOME: ${{ runner.temp }}/gsd-home
+        run: pnpm run gate:lifecycle-shadow-no-cutover 2>&1 | tee "${RUNNER_TEMP}/lifecycle-shadow-gate.log"
+
+      - name: Write job summary
+        if: always()
+        shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          {
+            echo "### Remote pr-verification summary"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| repo | ${SOURCE_REPO} |"
+            echo "| source_ref | ${SOURCE_REF} |"
+            echo "| expected_sha | ${EXPECTED_SHA} |"
+            echo "| result | ${JOB_STATUS} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload diagnostic logs on failure
+        if: failure()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: gsd-pi-remote-pr-verification-diagnostics
+          path: |
+            ${{ runner.temp }}/test-unit-compiled.log
+            ${{ runner.temp }}/lifecycle-shadow-gate.log
+          if-no-files-found: ignore
+          retention-days: 3
