@@ -71,6 +71,36 @@ Remaining open items for phase 2, now that sharding is evidence-backed and in pr
    Docker e2e) are worth reproducing here at all, versus continuing to rely on real
    upstream CI (post-`Ship.`) as the source of truth for those specific checks.
 
+## Sharding experiment result (run 32016308055, 2026-08-17)
+
+`.github/workflows/remote-pr-verification-sharded.yml`, dispatched against
+`fix/mai-cost-table-provider-section` at `28a2c92c3835e61f5fd19beffc6b8b4c6476bfc6`
+with `shard_count=4`:
+
+- All jobs succeeded: `build`, 4/4 `test-shard` matrix jobs, `lifecycle-gate`,
+  `aggregate`.
+- Aggregate totals across the 4 shards: **14176 passed, 0 failed, 31 skipped** — an
+  exact match to the known unsharded baseline for this commit. Per-shard breakdown:
+  shard 1: 3847/0/6, shard 2: 3148/0/4, shard 3: 3700/0/3, shard 4: 3481/0/18. This is
+  conclusive proof no test file was skipped or run twice: any gap or duplicate would
+  have changed the summed total.
+- Compiled test file count check passed against the corrected baseline of 1274 (see
+  the workflow's `EXPECTED_TEST_FILE_COUNT` comment for why the first dispatch's
+  1272 guess was wrong and how 1274 was derived).
+- `gate:lifecycle-shadow-no-cutover` passed, running once (not sharded), in 1m21s.
+- `pipefail` was active throughout (job-level `defaults.run.shell: bash`).
+- Total wall clock: build 4m22s + longest shard (1/4) 7m35s + aggregate 7s ≈ **12m04s**
+  end-to-end, run started to finished, versus the 19m11s unsharded baseline (run
+  31857969918) — a **~37% reduction**, comfortably above the ~30% target and consistent
+  with the estimate that motivated starting at 4 shards rather than 2.
+- A first dispatch (run 32015752880) failed fast and cheaply at the file-count safety
+  check (1274 actual vs. an incorrectly hand-counted 1272 expected) before any shard
+  ran — this is the safety check performing exactly as designed, not a sharding
+  correctness problem. Fixed and re-dispatched once (2 dispatches total, as planned).
+
+This confirms the shard-flag placement and correctness proof are now demonstrated in
+a real remote CI run, not only in the local synthetic-fixture validation above.
+
 ## Constraints that continue to apply once phase 2 starts
 
 - Any sharding design must build and compile tests exactly once, with shards
