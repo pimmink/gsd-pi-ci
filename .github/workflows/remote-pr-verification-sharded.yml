@@ -91,11 +91,16 @@ env:
     dist-test/src/resources/extensions/voice/tests/*.test.js
     dist-test/src/resources/extensions/mcp-client/tests/*.test.js
     dist-test/src/resources/extensions/remote-questions/tests/*.test.js
-  # Point-in-time count of source .test.ts/.test.mts files across the same globs'
-  # source-side equivalents, counted 2026-08 against the commit above. Compiled
-  # output (dist-test/**/*.test.js) should match 1:1 since test:compile does not
-  # split or merge files.
-  EXPECTED_TEST_FILE_COUNT: '1272'
+  # Ground truth for this exact commit (28a2c92c3835e61f5fd19beffc6b8b4c6476bfc6),
+  # measured directly by this workflow's own file-count step in run 32015752880 -
+  # not hand-counted locally. Two independent local recount attempts (find
+  # -maxdepth 1: 1272; git ls-files pathspec glob: 1352) both disagreed with each
+  # other and with this measured value, because neither tool's glob semantics
+  # exactly match the bash nullglob expansion the count step below actually uses
+  # (git pathspec globs can match across path separators; find's flag combination
+  # had an unrelated bug). Trust the workflow's own measured count over ad hoc
+  # local recounts for this glob shape.
+  EXPECTED_TEST_FILE_COUNT: '1274'
 
 concurrency:
   group: gsd-pi-remote-pr-verification-sharded-${{ inputs.source_ref }}
