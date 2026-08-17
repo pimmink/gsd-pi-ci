@@ -1,39 +1,41 @@
-# gsd-pi-ci: EXPERIMENTAL sharded remote `pr`-tier verification for pimmink/gsd-pi.
+# gsd-pi-ci: GENERALIZED sharded remote `pr`-tier verification for pimmink/gsd-pi.
 #
-# Purpose: measure whether splitting `test:unit:compiled` across N parallel shards
-# meaningfully reduces wall-clock time, and prove (in real CI, against the real
-# ~1,272-file suite) that Node's native `--test-shard=<index>/<total>` partitions
-# files with no gaps and no duplicates when combined with this repo's exact test
-# flags (`--experimental-test-isolation=process`, the custom compact reporter, the
-# `dist-test-resolve.mjs` import hook).
+# Originally an experiment to measure whether splitting `test:unit:compiled` across N
+# parallel shards meaningfully reduces wall-clock time (see docs/phase-2-deferral.md
+# for that history: run 32016308055 proved it, ~37% reduction). That experiment used a
+# hand-copied list of 13 test globs and hardcoded expected file/pass/fail/skip counts
+# from one specific commit. Those hardcoded values made the workflow silently unusable
+# against ANY other commit/branch with a different test count (discovered against the
+# `feat/github-copilot-model-catalog-sync` branch, which legitimately has more tests
+# than the calibration commit - see run 32024561928 and docs/phase-2-deferral.md).
+#
+# This revision removes that dependency structurally: the canonical set of compiled
+# test files is derived at run time from the actual checked-out commit's own
+# `package.json` `test:unit:compiled` script (never a copied glob list), expanded into
+# a manifest by directly reading the compiled `dist-test/` output (not shell globbing,
+# which previously produced multiple different, mutually disagreeing counts for the
+# same tree - see the "why not shell globbing" note on the expand step below), and
+# partitioned into shard_count deterministic, non-overlapping chunks in the build job.
+# Each shard job runs exactly its own precomputed chunk (no reliance on Node's own
+# `--test-shard` glob-resolution semantics, which cannot be proven to receive an
+# identical file list across shard processes as easily as a shared, checksummed
+# manifest artifact can). Pass/skipped totals are summed and reported dynamically,
+# never compared against a hardcoded historical baseline; `failed` is asserted to be
+# exactly zero. Coverage (every canonical file assigned to exactly one shard, no gaps,
+# no duplicates) is proven structurally by reassembling the shard partitions and
+# diffing them against the canonical manifest, not by matching a magic number.
 #
 # This is a SEPARATE file from remote-pr-verification.yml on purpose: the stable
-# harness is never modified by this experiment, and this workflow's concurrency
-# group is namespaced independently so an experimental dispatch can never cancel a
-# legitimate stable-harness run (or vice versa).
+# harness is never modified by this workflow, and this workflow's concurrency group is
+# namespaced independently so a sharded dispatch can never cancel a legitimate
+# stable-harness run (or vice versa). remote-pr-verification.yml remains available as
+# a trusted, simpler fallback (see docs/remote-verification-guide.md).
 #
-# Local validation performed before writing this workflow (see docs/phase-2-deferral.md):
-# a synthetic multi-glob fixture, run with the identical flag combination used below,
-# confirmed `--test-shard` (a) must be placed immediately after `--test` and BEFORE
-# the glob patterns (placing it after the globs silently disables partitioning -
-# every shard reran all files), (b) pools files across all glob patterns before
-# dividing (not per-glob), and (c) is deterministic and gap/duplicate-free across
-# repeated invocations, including with an uneven file-count/shard-count ratio.
-#
-# Correctness proof for the REAL suite (this run): TAP test names are not reliable
-# file-identity proxies once files contain multiple test()/describe() calls (proven
-# during local validation), so file-level dedup is NOT verified by parsing test
-# names. Instead: (1) the build job counts compiled test files across the same 13
-# globs `test:unit:compiled` uses and asserts that count against a known baseline;
-# (2) the aggregate job sums each shard's pass/fail/skipped counts and asserts the
-# total against a known unsharded baseline. Given Node's `--test-shard` already
-# guarantees a complete, non-overlapping file partition (this is the unit it divides
-# on, not individual tests), a matching total count across shards is conclusive proof
-# no file was skipped or run twice in this specific run.
-#
-# Out of scope, same as remote-pr-verification.yml: merge-parity tier, Docker e2e,
-# Codespaces, Copilot cloud agents. See docs/phase-2-deferral.md.
-name: Remote PR verification (gsd-pi) - sharded experiment
+# Not merge-parity: Windows-, Node 22-, and conditional Docker-e2e checks remain out of
+# scope, same as remote-pr-verification.yml. See docs/phase-2-deferral.md.
+name: Remote PR verification (gsd-pi) - sharded
+
+run-name: "Sharded verify: ${{ inputs.source_ref }} @ ${{ inputs.expected_sha }} (run #${{ github.run_number }})"
 
 "on":
   workflow_dispatch:
@@ -51,56 +53,12 @@ name: Remote PR verification (gsd-pi) - sharded experiment
         required: false
         type: string
         default: '4'
-      expected_passed:
-        description: 'Known-good total passed count for this exact commit (unsharded baseline)'
-        required: false
-        type: string
-        default: '14176'
-      expected_failed:
-        description: 'Known-good total failed count for this exact commit (unsharded baseline)'
-        required: false
-        type: string
-        default: '0'
-      expected_skipped:
-        description: 'Known-good total skipped count for this exact commit (unsharded baseline)'
-        required: false
-        type: string
-        default: '31'
 
 permissions:
   contents: read
 
 env:
   SOURCE_REPO: pimmink/gsd-pi
-  # Same 13 globs as pimmink/gsd-pi's package.json `test:unit:compiled` script
-  # (read from commit 28a2c92c3835e61f5fd19beffc6b8b4c6476bfc6). This experiment
-  # deliberately does not modify that script, so this list is a point-in-time copy;
-  # if it drifts from the real script, the build job's file-count assertion below
-  # will fail loudly rather than silently under- or over-counting.
-  TEST_GLOBS: >-
-    dist-test/src/tests/*.test.js
-    dist-test/src/resources/extensions/gsd/tests/*.test.js
-    dist-test/src/resources/extensions/gsd/tests/*.test.mjs
-    dist-test/src/resources/extensions/shared/tests/*.test.js
-    dist-test/src/resources/extensions/subagent/tests/*.test.js
-    dist-test/src/resources/extensions/claude-code-cli/tests/*.test.js
-    dist-test/src/resources/extensions/cursor-cli/tests/*.test.js
-    dist-test/src/resources/extensions/github-sync/tests/*.test.js
-    dist-test/src/resources/extensions/universal-config/tests/*.test.js
-    dist-test/src/resources/extensions/visual-brief/tests/*.test.js
-    dist-test/src/resources/extensions/voice/tests/*.test.js
-    dist-test/src/resources/extensions/mcp-client/tests/*.test.js
-    dist-test/src/resources/extensions/remote-questions/tests/*.test.js
-  # Ground truth for this exact commit (28a2c92c3835e61f5fd19beffc6b8b4c6476bfc6),
-  # measured directly by this workflow's own file-count step in run 32015752880 -
-  # not hand-counted locally. Two independent local recount attempts (find
-  # -maxdepth 1: 1272; git ls-files pathspec glob: 1352) both disagreed with each
-  # other and with this measured value, because neither tool's glob semantics
-  # exactly match the bash nullglob expansion the count step below actually uses
-  # (git pathspec globs can match across path separators; find's flag combination
-  # had an unrelated bug). Trust the workflow's own measured count over ad hoc
-  # local recounts for this glob shape.
-  EXPECTED_TEST_FILE_COUNT: '1274'
 
 concurrency:
   group: gsd-pi-remote-pr-verification-sharded-${{ inputs.source_ref }}
@@ -116,6 +74,7 @@ jobs:
         shell: bash
     outputs:
       shard_matrix: ${{ steps.matrix.outputs.shard_matrix }}
+      manifest_total: ${{ steps.expand.outputs.total }}
     steps:
       - name: Verify source_ref resolves to expected_sha (before touching any objects)
         shell: bash
@@ -183,6 +142,32 @@ jobs:
             exit 1
           fi
           echo "HEAD verified: ${head_sha}"
+
+      # Written early (not just at the end) so an in-progress run is immediately
+      # inspectable from the Summary tab without reading step logs.
+      - name: Write initial job summary (repo, refs, checked-out SHA, workflow ref, run link)
+        if: always()
+        shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          SHARD_COUNT: ${{ inputs.shard_count }}
+          WORKFLOW_REF: ${{ github.ref_name }}
+        run: |
+          actual_sha="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
+          {
+            echo "### Sharded remote pr-verification — run #${GITHUB_RUN_NUMBER}"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| source repo | ${SOURCE_REPO} |"
+            echo "| source_ref | ${SOURCE_REF} |"
+            echo "| expected_sha | ${EXPECTED_SHA} |"
+            echo "| actual checked-out SHA | ${actual_sha} |"
+            echo "| workflow version/ref | ${WORKFLOW_REF} (gsd-pi-ci) |"
+            echo "| shard_count | ${SHARD_COUNT} |"
+            echo "| run URL | ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Compute shard matrix from shard_count input
         id: matrix
@@ -253,26 +238,111 @@ jobs:
           cp "${addons[@]}" dist-test/native/addon/
           ls -la dist-test/native/addon/
 
-      # Independent sanity check on the compiled output, ahead of any sharding:
-      # confirms test:compile produced the expected number of runnable files for
-      # the exact same glob set the shard jobs will use, catching silent drift
-      # between this workflow's copied TEST_GLOBS and the real package.json script.
-      - name: Count compiled test files across TEST_GLOBS
+      # Fail-closed, no hardcoded glob list: parses the ACTUAL checked-out commit's own
+      # package.json "test:unit:compiled" script for its dist-test/ glob arguments. If a
+      # future commit adds/removes/renames a glob in that script, this step picks it up
+      # automatically instead of silently drifting from a stale copy (the exact failure
+      # mode that made the previous experimental workflow unusable on this branch).
+      - name: Derive canonical test globs from the checked-out package.json (no hardcoded copy)
+        id: globs
         shell: bash
         run: |
-          shopt -s nullglob
-          total=0
-          for pattern in $TEST_GLOBS; do
-            # shellcheck disable=SC2206  # intentional word-splitting/globbing of a fixed glob pattern
-            files=($pattern)
-            echo "${pattern}: ${#files[@]} file(s)"
-            total=$((total + ${#files[@]}))
-          done
-          echo "Total compiled test files: ${total} (expected: ${EXPECTED_TEST_FILE_COUNT})"
-          if [[ "$total" -ne "$EXPECTED_TEST_FILE_COUNT" ]]; then
-            echo "::error::Compiled test file count (${total}) does not match expected baseline (${EXPECTED_TEST_FILE_COUNT}). TEST_GLOBS in this workflow may have drifted from gsd-pi's package.json, or the source tree changed. Refusing to proceed with sharding on an unverified file set."
-            exit 1
-          fi
+          set -euo pipefail
+          # shellcheck disable=SC2016  # single quotes intentionally protect the JS template literals below from shell expansion
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const script = pkg.scripts && pkg.scripts["test:unit:compiled"];
+            if (!script) {
+              console.error("::error::package.json has no \"test:unit:compiled\" script at this commit - cannot derive a test manifest.");
+              process.exit(1);
+            }
+            const globs = [...script.matchAll(/"(dist-test\/[^"]+)"/g)].map((m) => m[1]);
+            if (globs.length === 0) {
+              console.error("::error::Found test:unit:compiled but extracted zero dist-test/ glob patterns from it - its format may have changed; update this parser.");
+              process.exit(1);
+            }
+            fs.writeFileSync("test-globs.json", JSON.stringify(globs, null, 2));
+            console.log(`Extracted ${globs.length} glob pattern(s) from the checked-out package.json:`);
+            for (const g of globs) console.log("  " + g);
+          '
+
+      # Deliberately NOT shell globbing (shopt -s nullglob / find / git ls-files): the
+      # prior experimental workflow tried multiple approaches for this same tree and
+      # got mutually disagreeing, all-incorrect counts, because none of their glob
+      # semantics exactly matched each other. Node's own fs.readdirSync + an explicit
+      # regex derived from the glob's literal `*` wildcard is unambiguous, and is the
+      # same mechanism used to partition the manifest below, so "what got counted" and
+      # "what gets partitioned" can never silently disagree with each other.
+      - name: Expand globs into a canonical, sorted, de-duplicated test manifest
+        id: expand
+        shell: bash
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2016  # single quotes intentionally protect the JS template literals below from shell expansion
+          node -e '
+            const fs = require("fs");
+            const path = require("path");
+            const globs = JSON.parse(fs.readFileSync("test-globs.json", "utf8"));
+            const files = new Set();
+            for (const pattern of globs) {
+              const dir = path.dirname(pattern);
+              const base = path.basename(pattern);
+              const re = new RegExp("^" + base.split("*").map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$");
+              if (!fs.existsSync(dir)) {
+                console.error(`::error::Glob directory does not exist after test:compile: ${dir}`);
+                process.exit(1);
+              }
+              for (const entry of fs.readdirSync(dir)) {
+                if (re.test(entry)) files.add(path.join(dir, entry));
+              }
+            }
+            const sorted = [...files].sort();
+            if (sorted.length === 0) {
+              console.error("::error::Expanded all glob patterns to zero files - test:compile may not have produced output, or the globs no longer match anything.");
+              process.exit(1);
+            }
+            fs.writeFileSync("test-manifest.txt", sorted.join("\n") + "\n");
+            console.log(`Canonical manifest: ${sorted.length} compiled test file(s).`);
+          '
+          total="$(wc -l < test-manifest.txt | tr -d ' ')"
+          echo "total=${total}" >> "$GITHUB_OUTPUT"
+          sha256sum test-manifest.txt > test-manifest.sha256
+          cat test-manifest.sha256
+
+      # Deterministic, contiguous chunking of the already-sorted canonical manifest -
+      # an explicit partition (allowed as a simpler, more provable alternative to
+      # relying on Node's own --test-shard glob-resolution across separate shard
+      # processes). Every shard job below runs ONLY its own precomputed chunk; the
+      # aggregate job reassembles all chunks and diffs them against the canonical
+      # manifest to prove no file was omitted or duplicated.
+      - name: Partition canonical manifest into shard_count deterministic chunks
+        shell: bash
+        env:
+          SHARD_COUNT: ${{ inputs.shard_count }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2016  # single quotes intentionally protect the JS template literals below from shell expansion
+          node -e '
+            const fs = require("fs");
+            const n = parseInt(process.env.SHARD_COUNT, 10);
+            const files = fs.readFileSync("test-manifest.txt", "utf8").trim().split("\n").filter(Boolean);
+            const total = files.length;
+            const base = Math.floor(total / n);
+            const extra = total % n;
+            let idx = 0;
+            for (let i = 0; i < n; i++) {
+              const size = base + (i < extra ? 1 : 0);
+              const chunk = files.slice(idx, idx + size);
+              idx += size;
+              fs.writeFileSync(`test-manifest-shard-${i + 1}.txt`, chunk.length ? chunk.join("\n") + "\n" : "");
+              console.log(`shard ${i + 1}/${n}: ${chunk.length} file(s)`);
+            }
+            if (idx !== total) {
+              console.error("::error::Partitioning did not consume the entire manifest - internal bug, refusing to proceed.");
+              process.exit(1);
+            }
+          '
 
       - name: Package build artifact for shard jobs
         shell: bash
@@ -285,6 +355,16 @@ jobs:
           name: gsd-pi-sharded-build-output
           path: build-output.tar.gz
           retention-days: 1
+
+      - name: Upload test manifest (canonical + per-shard partitions)
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: gsd-pi-sharded-test-manifest
+          path: |
+            test-manifest.txt
+            test-manifest.sha256
+            test-manifest-shard-*.txt
+          retention-days: 3
 
   test-shard:
     name: test-shard (${{ matrix.shard }}/${{ inputs.shard_count }})
@@ -337,10 +417,10 @@ jobs:
           node-version: '24'
           cache: 'pnpm'
 
-      # Native addon build/staging and test:compile happen exactly once, in the
-      # build job above. Dependency installation is deliberately re-run per shard
-      # (cheap and cache-backed, ~12s measured in run 31857969918) rather than
-      # trying to package and restore the full node_modules tree as an artifact.
+      # Native addon build/staging and test:compile happen exactly once, in the build
+      # job above. Dependency installation is deliberately re-run per shard (cheap and
+      # cache-backed, ~12s measured in run 31857969918) rather than trying to package
+      # and restore the full node_modules tree as an artifact.
       - name: Install dependencies
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
@@ -357,22 +437,37 @@ jobs:
       - name: Extract build artifact
         run: tar xzf build-output.tar.gz
 
-      # Same flags as the stable harness's "Run unit tests" step, plus --test-shard
-      # inserted immediately after --test and before the glob patterns (validated
-      # locally: placing it after the globs silently disables partitioning).
-      - name: Run test shard
+      - name: Download test manifest
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: gsd-pi-sharded-test-manifest
+
+      - name: Verify manifest checksum before running (defense in depth against artifact corruption)
+        shell: bash
+        run: sha256sum -c test-manifest.sha256
+
+      # No --test-shard flag: this shard's file list is already an explicit,
+      # precomputed, checksummed partition from the build job (see that job's
+      # "Partition canonical manifest" step) - every shard demonstrably runs a subset
+      # of the exact same manifest, not a re-derived glob resolution of its own.
+      - name: Run this shard's precomputed file partition
         id: run_shard
         env:
           GSD_NATIVE_PREFER_LOCAL: '1'
         shell: bash
         run: |
           set -o pipefail
-          # shellcheck disable=SC2086  # intentional word-splitting: TEST_GLOBS holds multiple glob patterns
+          shard_file="test-manifest-shard-${{ matrix.shard }}.txt"
+          if [[ ! -s "$shard_file" ]]; then
+            echo "shard=${{ matrix.shard }} passed=0 failed=0 skipped=0" | tee "shard-${{ matrix.shard }}-summary.txt"
+            echo "Shard ${{ matrix.shard }} has an empty partition (shard_count likely exceeds file count) - nothing to run."
+            exit 0
+          fi
+          mapfile -t shard_files < "$shard_file"
           node --import ./scripts/dist-test-resolve.mjs \
             --experimental-test-isolation=process \
             --test-reporter=./scripts/test-reporter-compact.mjs \
-            --test --test-shard=${{ matrix.shard }}/${{ inputs.shard_count }} \
-            $TEST_GLOBS \
+            --test "${shard_files[@]}" \
             2>&1 | tee "shard-${{ matrix.shard }}.log"
 
           summary_line="$(grep -E '^(✔|✖) [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' "shard-${{ matrix.shard }}.log" | tail -1)"
@@ -502,6 +597,11 @@ jobs:
           echo "::error::lifecycle-gate job did not succeed (result: ${{ needs.lifecycle-gate.result }})."
           exit 1
 
+      - name: Download test manifest (canonical + per-shard partitions)
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: gsd-pi-sharded-test-manifest
+
       - name: Download all shard summaries
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
@@ -509,17 +609,55 @@ jobs:
           path: summaries
           merge-multiple: true
 
-      # Node's --test-shard divides the resolved file list itself, so a complete,
-      # non-overlapping partition is guaranteed by construction (validated locally
-      # with the exact same flags on a synthetic fixture). The check below proves
-      # that guarantee held for THIS real run: if any file had been skipped or run
-      # twice, the summed pass+fail+skipped total would not match the known
-      # unsharded baseline for this exact commit.
-      - name: Sum shard results and compare against known baseline
+      # Structural coverage proof, not a magic-number match: reassembles every shard's
+      # precomputed partition and diffs the result against the canonical manifest the
+      # build job derived from the checked-out package.json. Any gap or duplicate here
+      # is a real, unconditional failure regardless of what commit is being verified.
+      - name: Prove manifest coverage (no omissions, no duplicates) - not baseline-dependent
         env:
-          EXPECTED_PASSED: ${{ inputs.expected_passed }}
-          EXPECTED_FAILED: ${{ inputs.expected_failed }}
-          EXPECTED_SKIPPED: ${{ inputs.expected_skipped }}
+          SHARD_COUNT: ${{ inputs.shard_count }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2016  # single quotes intentionally protect the JS template literals below from shell expansion
+          node -e '
+            const fs = require("fs");
+            const n = parseInt(process.env.SHARD_COUNT, 10);
+            const canonical = fs.readFileSync("test-manifest.txt", "utf8").trim().split("\n").filter(Boolean);
+            let reassembled = [];
+            for (let i = 1; i <= n; i++) {
+              const p = `test-manifest-shard-${i}.txt`;
+              if (!fs.existsSync(p)) {
+                console.error(`::error::Missing shard partition file: ${p}`);
+                process.exit(1);
+              }
+              const chunk = fs.readFileSync(p, "utf8").trim().split("\n").filter(Boolean);
+              reassembled.push(...chunk);
+            }
+            const canonicalSorted = [...canonical].sort();
+            const reassembledSorted = [...reassembled].sort();
+            if (reassembled.length !== new Set(reassembled).size) {
+              console.error("::error::A file appears in more than one shard partition - duplicate coverage detected.");
+              process.exit(1);
+            }
+            if (reassembled.length !== canonical.length) {
+              console.error(`::error::Reassembled shard partitions (${reassembled.length} files) do not match the canonical manifest (${canonical.length} files) in count.`);
+              process.exit(1);
+            }
+            for (let i = 0; i < canonicalSorted.length; i++) {
+              if (canonicalSorted[i] !== reassembledSorted[i]) {
+                console.error(`::error::Manifest mismatch at position ${i}: canonical="${canonicalSorted[i]}" reassembled="${reassembledSorted[i]}"`);
+                process.exit(1);
+              }
+            }
+            console.log(`Manifest coverage proven: ${canonical.length} canonical files, all assigned to exactly one shard, zero omissions, zero duplicates.`);
+          '
+
+      # Dynamic totals only - deliberately NOT compared against any hardcoded
+      # historical passed/failed/skipped baseline (the exact dependency that made the
+      # prior experimental workflow unusable on a branch with a different test count).
+      # `failed` must always be exactly zero; passed/skipped are reported, not gated.
+      - name: Sum shard results (dynamic totals, no hardcoded baseline)
+        env:
           SHARD_COUNT: ${{ inputs.shard_count }}
         run: |
           total_passed=0
@@ -541,14 +679,13 @@ jobs:
             total_skipped=$((total_skipped + skipped))
           done
           echo "Aggregate: ${total_passed} passed, ${total_failed} failed, ${total_skipped} skipped"
-          echo "Expected:  ${EXPECTED_PASSED} passed, ${EXPECTED_FAILED} failed, ${EXPECTED_SKIPPED} skipped"
-          if [[ "$total_passed" -ne "$EXPECTED_PASSED" || "$total_failed" -ne "$EXPECTED_FAILED" || "$total_skipped" -ne "$EXPECTED_SKIPPED" ]]; then
-            echo "::error::Aggregate shard totals do not match the known unsharded baseline. This means at least one test file was skipped, duplicated, or genuinely regressed - treat as a hard failure, not just a mismatch."
+          if [[ "$total_failed" -ne 0 ]]; then
+            echo "::error::Aggregate reports ${total_failed} real test failure(s) - hard failure, unconditional regardless of commit."
             exit 1
           fi
-          echo "Aggregate totals match the known baseline exactly: no missing or duplicated test files."
+          echo "failed=0 confirmed. passed/skipped totals above are this exact commit's real, dynamically-summed counts."
 
-      - name: Write job summary
+      - name: Write final job summary
         if: always()
         shell: bash
         env:
@@ -556,7 +693,7 @@ jobs:
           EXPECTED_SHA: ${{ inputs.expected_sha }}
         run: |
           {
-            echo "### Sharded remote pr-verification summary"
+            echo "### Sharded remote pr-verification — final aggregate"
             echo ""
             echo "| field | value |"
             echo "|---|---|"
@@ -564,4 +701,5 @@ jobs:
             echo "| source_ref | ${SOURCE_REF} |"
             echo "| expected_sha | ${EXPECTED_SHA} |"
             echo "| shard_count | ${{ inputs.shard_count }} |"
+            echo "| run URL | ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} |"
           } >> "$GITHUB_STEP_SUMMARY"

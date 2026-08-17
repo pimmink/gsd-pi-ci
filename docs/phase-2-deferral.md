@@ -1,11 +1,18 @@
-# Phase 2: merge-parity tier (deferred) and sharding (evidence-backed, in progress)
+# Phase 2: merge-parity tier (deferred) and sharding (proof complete, now operationalized)
 
 This started as a deliberate scope note for a phase with nothing built yet. Sharding has
-since moved from "deferred, no measurement" to "evidence-backed, in progress": two real
-runs of `remote-pr-verification.yml` (one cold, one cache-warm and valid) have measured
-the actual bottleneck, and `.github/workflows/remote-pr-verification-sharded.yml` is an
-experimental workflow validating a sharded design against that measurement. The
-`merge`-parity tier and Docker-e2e items remain deferred, not yet started.
+since moved from "deferred, no measurement" through "evidence-backed experiment" to
+**"proof complete, and now operationalized as a branch-agnostic workflow"**: the original
+sharding proof (run 32016308055) validated the shard-flag mechanics and the ~37% wall-clock
+reduction against one calibration commit, using a hand-copied glob list and a hardcoded
+expected file/pass/fail/skip baseline. That hardcoded baseline made the workflow silently
+unusable against any other commit — discovered when a real unsharded reference run against
+the `feat/github-copilot-model-catalog-sync` branch (run 32024561928) measured 14299 tests,
+not the calibration commit's 14176. `.github/workflows/remote-pr-verification-sharded.yml`
+has since been rewritten to derive its manifest from whatever commit is actually checked
+out, removing the hardcoded-baseline dependency structurally (see "Operationalization" below
+for the full explanation and the new run evidence). The `merge`-parity tier and Docker-e2e
+items remain deferred, not yet started.
 
 ## What is deferred and why
 
@@ -101,6 +108,47 @@ with `shard_count=4`:
 This confirms the shard-flag placement and correctness proof are now demonstrated in
 a real remote CI run, not only in the local synthetic-fixture validation above.
 
+## Baseline drift discovered, and why operationalization was required (2026-08-17)
+
+The experiment above proved sharding *works*, but its implementation encoded
+point-in-time facts about one commit: 13 hand-copied test globs,
+`EXPECTED_TEST_FILE_COUNT=1274`, and default totals of 14176/0/31. Those values are not
+properties of the sharding mechanism — they are a snapshot of one specific tree. The
+`feat/github-copilot-model-catalog-sync` branch legitimately has more tests than that
+snapshot (new Copilot catalog tests added on top of upstream), so the experimental
+workflow's fixed expectations would have hard-failed a completely healthy run for no
+real reason. This is evidenced directly by comparing run 32024561928 (unsharded,
+14299/0/31) against the experiment's hardcoded 14176/0/31 default — a mismatch that has
+nothing to do with test correctness and everything to do with the workflow assuming its
+calibration commit was permanent.
+
+`.github/workflows/remote-pr-verification-sharded.yml` was rewritten so the canonical
+test manifest is derived from the actually-checked-out commit's own `package.json`
+`test:unit:compiled` script every run (never a copied glob list, never a hardcoded file
+count), partitioned deterministically into a checksummed artifact all shards verify
+identically, and reassembled in the aggregate job to prove structural coverage (no
+gaps, no duplicates) instead of matching a magic number. Pass/skipped totals are summed
+and reported dynamically; `failed` is asserted to be exactly zero, unconditionally. See
+`docs/remote-verification-guide.md` for the full operational writeup of this design and
+[`run 32024561928`](#reference-run-32024561928-catalog-sync-branch-unsharded-2026-08-17)
+below for the reference run that exposed the original drift.
+
+### Reference run: 32024561928 (catalog-sync branch, unsharded, 2026-08-17)
+
+Dispatched against `feat/github-copilot-model-catalog-sync` at
+`5e204ae7917aa9c73c806f293a979cf169889b6d` using the stable, unsharded
+`remote-pr-verification.yml` (the sharded workflow was not used for this run — its
+baseline was already known to be stale for this branch, so it would have failed the
+file-count safety check before running any tests):
+
+- **14299 passed, 0 failed, 31 skipped.**
+- `gate:lifecycle-shadow-no-cutover` passed.
+- Total wall-clock: ~15m53s.
+- This is the reference total this session's generalized sharded workflow run is
+  expected to match dynamically (not via a hardcoded comparison in the workflow
+  itself — the workflow no longer encodes any expected total at all; this document is
+  the only place the comparison is made, for human/agent evidence purposes).
+
 ## Constraints that continue to apply once phase 2 starts
 
 - Any sharding design must build and compile tests exactly once, with shards
@@ -126,4 +174,25 @@ a real remote CI run, not only in the local synthetic-fixture validation above.
   (The synthetic-fixture validation above used a single tiny throwaway test set with
   trivial, near-instant tests — not the real ~1,272-file suite, and never running
   multiple shards' worth of real work concurrently on this machine.)
+
+## Design note: explicit manifest partitioning superseded `--test-shard` (2026-08-17)
+
+The constraint above (verified during the original experiment) established that Node's
+native `--test-shard` divides "all test files into total equal parts" deterministically
+when given an identical file list. The generalized workflow still honors that
+constraint's spirit but implements it more provably: instead of relying on each shard
+process to independently re-resolve the same glob into the same list (which cannot be
+directly observed to have happened identically across separate GitHub Actions runners),
+the build job now computes the canonical manifest once, partitions it into explicit
+per-shard files, checksums the whole set, and uploads it as a shared artifact every
+shard downloads and verifies before running only its assigned partition. This is the
+"explicit deterministic manifest partitioning" alternative anticipated as acceptable
+when simpler and more provable — coverage is proven structurally (reassemble and diff
+against the canonical list) rather than assumed from `--test-shard`'s documented
+behavior alone.
+
+## New runs from this session (2026-08-17, CI-harness operability work)
+
+Filled in as each run in this session completes; see the session's final report for
+the authoritative run IDs, URLs, totals, and durations.
 

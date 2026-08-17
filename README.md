@@ -5,9 +5,12 @@ free GitHub-hosted runner instead of a low-resource local laptop. This project i
 **not** the `gsd-pi` fork itself, does not contain any `gsd-pi` source code, and does
 not touch the current Copilot-catalogue branch or its PR diff in any way.
 
-Local-only project status: as of this commit, this directory has **not** been pushed
-anywhere and no `pimmink/gsd-pi-ci` GitHub repository exists yet. See "Authorization
-boundaries" below.
+This repository is pushed to and lives at `pimmink/gsd-pi-ci` on GitHub, and its
+workflows have been dispatched multiple times against real `pimmink/gsd-pi` commits
+(see [`docs/phase-2-deferral.md`](docs/phase-2-deferral.md) for the run history). See
+[`docs/remote-verification-guide.md`](docs/remote-verification-guide.md) for the full
+operational manual (dispatching, watching, resuming, and interpreting a run), and
+[`AGENTS.md`](AGENTS.md) for the short agent entry point.
 
 ## Purpose
 
@@ -21,17 +24,25 @@ trust. This harness runs the same `verify:pr` scope
 on a clean, dedicated 4-core runner, with the native engine correctly built and staged
 first, so a "pr" signal from here is not confounded by either problem.
 
-## Scope (phase 1 MVP)
+## Scope
 
-- One workflow: `.github/workflows/remote-pr-verification.yml`.
-- One tier: remote `pr`-verification only. There is no `targeted` tier here — targeted
-  feature tests and typechecking of touched files stay local, as before.
+- Two workflows, both remote `pr`-tier only:
+  - `.github/workflows/remote-pr-verification.yml` — the stable, unsharded harness.
+    Trusted fallback; always available; no baseline dependency of any kind.
+  - `.github/workflows/remote-pr-verification-sharded.yml` — the generalized sharded
+    harness. Derives its test manifest from whatever commit is actually checked out
+    (never a hardcoded file/glob list or pass/fail/skip baseline), so it is safe to use
+    against any branch regardless of test count. See
+    [`docs/remote-verification-guide.md`](docs/remote-verification-guide.md) for
+    tier-selection guidance.
+- There is no `targeted` tier here — targeted feature tests and typechecking of
+  touched files stay local, as before.
 - There is no `merge`-tier workflow yet. `pimmink/gsd-pi`'s upstream CI also runs
   `windows-portability`, `node22-smoke`, and a conditional Docker e2e job as part of
   its blocking `build` gate; this harness does not reproduce any of those yet, so it is
   deliberately not named or presented as a `merge`-parity check. See
   [`docs/phase-2-deferral.md`](docs/phase-2-deferral.md).
-- No sharding, no Codespaces, no Copilot cloud agent usage anywhere in this design.
+- No Codespaces, no Copilot cloud agent usage anywhere in this design.
 
 ## What the remote `pr` run actually does
 
@@ -119,35 +130,22 @@ someone explicitly dispatches it with a `source_ref` and `expected_sha`. It is i
 to be run at a stable local checkpoint after a branch has been pushed, not after every
 small edit.
 
-## Authorization boundaries
+## Authorization boundaries (still standing)
 
-This project currently exists only as local files on disk. The following actions are
-**not authorized by creating these files** and each requires its own separate, explicit
-go-ahead in the future:
+The repository, its push history, and its past dispatches are no longer pending
+authorization (all of that has already happened; see
+[`docs/phase-2-deferral.md`](docs/phase-2-deferral.md) for the run history). The
+following remain **not authorized by editing files in this repository** and each still
+requires its own separate, explicit go-ahead:
 
-- Creating the `pimmink/gsd-pi-ci` GitHub repository (`gh repo create` or equivalent).
-- Any `git commit` or `git push` from this directory.
-- Pushing any branch/commit of `pimmink/gsd-pi` itself.
-- Dispatching this workflow (`workflow_dispatch`) once it exists remotely.
-- Opening any issue or pull request, on either `pimmink/gsd-pi` or a future
-  `pimmink/gsd-pi-ci`.
+- Opening any issue or pull request, on either `pimmink/gsd-pi` or `pimmink/gsd-pi-ci`.
+- Force-pushing or deleting any branch.
+- Merging anything upstream.
+- Any change to historical/other in-flight branches this harness does not own.
 
-See the accompanying session plan for the exact proposed `Ship.` command that would
-authorize the minimal first slice of these (repo creation + push + one dispatch).
+## Run history
 
-## First cold run (run 31854731553, 2026-08-15)
-
-- Total workflow duration: 20m56s (dispatch to completion; ~5s queue wait).
-- Unit-test step (`test:unit:compiled`) alone: ~15m31s.
-- Native addon build/staging worked as designed; the compiled-test loader found the
-  mirrored `.node` addon with no gap.
-- No timeout or resource-exhaustion signals of any kind (contrast with the local
-  laptop `verify:pr` run in the same session, which hit several 60s `ETIMEDOUT`
-  fault-harness timeouts under local resource contention).
-- Reported as green, but was formally invalid: 9 real unit-test failures were masked
-  by the missing-`pipefail` bug described above (fixed in this revision), and 7 of
-  those 9 were caused by the now-removed `GSD_HOME` override.
-- Sharding is still not implemented and still not being designed. This single
-  unsharded run comfortably fits the 60-minute job timeout, so a second, cache-warm,
-  actually-valid (post-fix) run's wall-clock time should be measured before any
-  sharding decision — not this cold, invalid run alone.
+See [`docs/phase-2-deferral.md`](docs/phase-2-deferral.md) for the full, dated history
+of every measured run (cold/invalid, valid baseline, sharding experiment, and the
+generalized-workflow operationalization), including durations and evidence for every
+claim made in this README.

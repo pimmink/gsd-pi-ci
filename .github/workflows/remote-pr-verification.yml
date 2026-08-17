@@ -14,6 +14,8 @@
 # docs/phase-2-deferral.md for why and what would need to change first.
 name: Remote PR verification (gsd-pi)
 
+run-name: "Stable verify: ${{ inputs.source_ref }} @ ${{ inputs.expected_sha }} (run #${{ github.run_number }})"
+
 "on":
   workflow_dispatch:
     inputs:
@@ -213,7 +215,9 @@ jobs:
           SOURCE_REF: ${{ inputs.source_ref }}
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           JOB_STATUS: ${{ job.status }}
+          WORKFLOW_REF: ${{ github.ref_name }}
         run: |
+          actual_sha="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD 2>/dev/null || echo unknown)"
           {
             echo "### Remote pr-verification summary"
             echo ""
@@ -222,7 +226,10 @@ jobs:
             echo "| repo | ${SOURCE_REPO} |"
             echo "| source_ref | ${SOURCE_REF} |"
             echo "| expected_sha | ${EXPECTED_SHA} |"
+            echo "| actual checked-out SHA | ${actual_sha} |"
+            echo "| workflow version/ref | ${WORKFLOW_REF} (gsd-pi-ci) |"
             echo "| result | ${JOB_STATUS} |"
+            echo "| run URL | ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload diagnostic logs on failure
