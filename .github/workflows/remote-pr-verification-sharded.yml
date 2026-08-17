@@ -1,0 +1,562 @@
+# gsd-pi-ci: EXPERIMENTAL sharded remote `pr`-tier verification for pimmink/gsd-pi.
+#
+# Purpose: measure whether splitting `test:unit:compiled` across N parallel shards
+# meaningfully reduces wall-clock time, and prove (in real CI, against the real
+# ~1,272-file suite) that Node's native `--test-shard=<index>/<total>` partitions
+# files with no gaps and no duplicates when combined with this repo's exact test
+# flags (`--experimental-test-isolation=process`, the custom compact reporter, the
+# `dist-test-resolve.mjs` import hook).
+#
+# This is a SEPARATE file from remote-pr-verification.yml on purpose: the stable
+# harness is never modified by this experiment, and this workflow's concurrency
+# group is namespaced independently so an experimental dispatch can never cancel a
+# legitimate stable-harness run (or vice versa).
+#
+# Local validation performed before writing this workflow (see docs/phase-2-deferral.md):
+# a synthetic multi-glob fixture, run with the identical flag combination used below,
+# confirmed `--test-shard` (a) must be placed immediately after `--test` and BEFORE
+# the glob patterns (placing it after the globs silently disables partitioning -
+# every shard reran all files), (b) pools files across all glob patterns before
+# dividing (not per-glob), and (c) is deterministic and gap/duplicate-free across
+# repeated invocations, including with an uneven file-count/shard-count ratio.
+#
+# Correctness proof for the REAL suite (this run): TAP test names are not reliable
+# file-identity proxies once files contain multiple test()/describe() calls (proven
+# during local validation), so file-level dedup is NOT verified by parsing test
+# names. Instead: (1) the build job counts compiled test files across the same 13
+# globs `test:unit:compiled` uses and asserts that count against a known baseline;
+# (2) the aggregate job sums each shard's pass/fail/skipped counts and asserts the
+# total against a known unsharded baseline. Given Node's `--test-shard` already
+# guarantees a complete, non-overlapping file partition (this is the unit it divides
+# on, not individual tests), a matching total count across shards is conclusive proof
+# no file was skipped or run twice in this specific run.
+#
+# Out of scope, same as remote-pr-verification.yml: merge-parity tier, Docker e2e,
+# Codespaces, Copilot cloud agents. See docs/phase-2-deferral.md.
+name: Remote PR verification (gsd-pi) - sharded experiment
+
+"on":
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Branch in pimmink/gsd-pi to verify (e.g. fix/my-branch)'
+        required: true
+        type: string
+      expected_sha:
+        description: 'Full 40-character commit SHA that source_ref must resolve to'
+        required: true
+        type: string
+      shard_count:
+        description: 'Number of parallel test:unit:compiled shards'
+        required: false
+        type: string
+        default: '4'
+      expected_passed:
+        description: 'Known-good total passed count for this exact commit (unsharded baseline)'
+        required: false
+        type: string
+        default: '14176'
+      expected_failed:
+        description: 'Known-good total failed count for this exact commit (unsharded baseline)'
+        required: false
+        type: string
+        default: '0'
+      expected_skipped:
+        description: 'Known-good total skipped count for this exact commit (unsharded baseline)'
+        required: false
+        type: string
+        default: '31'
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_REPO: pimmink/gsd-pi
+  # Same 13 globs as pimmink/gsd-pi's package.json `test:unit:compiled` script
+  # (read from commit 28a2c92c3835e61f5fd19beffc6b8b4c6476bfc6). This experiment
+  # deliberately does not modify that script, so this list is a point-in-time copy;
+  # if it drifts from the real script, the build job's file-count assertion below
+  # will fail loudly rather than silently under- or over-counting.
+  TEST_GLOBS: >-
+    dist-test/src/tests/*.test.js
+    dist-test/src/resources/extensions/gsd/tests/*.test.js
+    dist-test/src/resources/extensions/gsd/tests/*.test.mjs
+    dist-test/src/resources/extensions/shared/tests/*.test.js
+    dist-test/src/resources/extensions/subagent/tests/*.test.js
+    dist-test/src/resources/extensions/claude-code-cli/tests/*.test.js
+    dist-test/src/resources/extensions/cursor-cli/tests/*.test.js
+    dist-test/src/resources/extensions/github-sync/tests/*.test.js
+    dist-test/src/resources/extensions/universal-config/tests/*.test.js
+    dist-test/src/resources/extensions/visual-brief/tests/*.test.js
+    dist-test/src/resources/extensions/voice/tests/*.test.js
+    dist-test/src/resources/extensions/mcp-client/tests/*.test.js
+    dist-test/src/resources/extensions/remote-questions/tests/*.test.js
+  # Point-in-time count of source .test.ts/.test.mts files across the same globs'
+  # source-side equivalents, counted 2026-08 against the commit above. Compiled
+  # output (dist-test/**/*.test.js) should match 1:1 since test:compile does not
+  # split or merge files.
+  EXPECTED_TEST_FILE_COUNT: '1272'
+
+concurrency:
+  group: gsd-pi-remote-pr-verification-sharded-${{ inputs.source_ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (once)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      shard_matrix: ${{ steps.matrix.outputs.shard_matrix }}
+    steps:
+      - name: Verify source_ref resolves to expected_sha (before touching any objects)
+        shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          repo_url="https://github.com/pimmink/gsd-pi.git"
+
+          if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::expected_sha must be exactly 40 lowercase hexadecimal characters, got: $EXPECTED_SHA"
+            exit 1
+          fi
+
+          if [[ -z "$SOURCE_REF" || "$SOURCE_REF" == -* || "$SOURCE_REF" == refs/* ]]; then
+            echo "::error::source_ref must be a plain branch name, not an option or full ref"
+            exit 1
+          fi
+
+          if ! git check-ref-format --branch "$SOURCE_REF" >/dev/null; then
+            echo "::error::source_ref is not a valid Git branch name"
+            exit 1
+          fi
+
+          target_ref="refs/heads/${SOURCE_REF}"
+
+          remote_matches="$(git ls-remote "$repo_url" "$target_ref")"
+          match_count="$(printf '%s\n' "$remote_matches" | grep -c .)" || match_count=0
+          if [[ "$match_count" -ne 1 ]]; then
+            echo "::error::Expected exactly one match for ${target_ref} on ${repo_url}, found ${match_count}."
+            exit 1
+          fi
+          remote_sha="$(printf '%s\n' "$remote_matches" | cut -f1)"
+
+          if [[ "$remote_sha" != "$EXPECTED_SHA" ]]; then
+            echo "::error::${target_ref} on ${repo_url} currently points at ${remote_sha}, not the expected ${EXPECTED_SHA}. Stopping before checkout."
+            exit 1
+          fi
+          echo "Pre-checkout check passed: ${target_ref} == ${EXPECTED_SHA}"
+
+      - name: Checkout exact commit without a token (public repo, read-only)
+        shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          repo_url="https://github.com/pimmink/gsd-pi.git"
+          target_ref="refs/heads/${SOURCE_REF}"
+
+          git init "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "$repo_url"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git -c protocol.version=2 fetch --no-tags --prune --depth=1 origin \
+            "+${target_ref}:refs/checkout-ref"
+          git checkout --force --detach refs/checkout-ref
+
+      - name: Assert HEAD matches expected_sha (fail closed)
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          head_sha="$(git rev-parse HEAD)"
+          if [[ "$head_sha" != "$EXPECTED_SHA" ]]; then
+            echo "::error::HEAD is ${head_sha}, expected ${EXPECTED_SHA}. Stopping."
+            exit 1
+          fi
+          echo "HEAD verified: ${head_sha}"
+
+      - name: Compute shard matrix from shard_count input
+        id: matrix
+        shell: bash
+        env:
+          SHARD_COUNT: ${{ inputs.shard_count }}
+        run: |
+          if [[ ! "$SHARD_COUNT" =~ ^[0-9]+$ ]] || [[ "$SHARD_COUNT" -lt 1 ]] || [[ "$SHARD_COUNT" -gt 16 ]]; then
+            echo "::error::shard_count must be an integer between 1 and 16, got: $SHARD_COUNT"
+            exit 1
+          fi
+          matrix="$(node -e "console.log(JSON.stringify(Array.from({length: ${SHARD_COUNT}}, (_, i) => i + 1)))")"
+          echo "shard_matrix=${matrix}" >> "$GITHUB_OUTPUT"
+          echo "Shard matrix: ${matrix}"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0 (pinned, reused from gsd-pi's ci.yml)
+        with:
+          version: 10.12.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          GSD_SKIP_RTK_INSTALL: '1'
+          GSD_SKIP_DEP_REPAIR: '1'
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Rust toolchain (native addon for tests)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (pinned, reused from gsd-pi's ci.yml)
+
+      - name: Cache Rust build (native addon)
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (pinned, reused from gsd-pi's ci.yml)
+        with:
+          # Own namespace: must never collide with the stable harness's or gsd-pi's own keys.
+          shared-key: gsd-pi-ci-remote-pr-sharded-native-linux-x64-gnu
+          workspaces: native -> target
+
+      - name: Build native addon from source (test parity, dev + fault-injection profile)
+        env:
+          RUSTFLAGS: '-C target-cpu=x86-64'
+        run: pnpm run build:native:test
+
+      - name: Build core
+        run: pnpm run build:core
+
+      - name: Typecheck extensions
+        run: pnpm run typecheck:extensions
+
+      - name: Compile test artifacts
+        run: pnpm run test:compile
+
+      - name: Mirror native addon into dist-test (compiled-test loader path)
+        run: |
+          mkdir -p dist-test/native/addon
+          shopt -s nullglob
+          addons=(native/addon/*.node)
+          if [[ ${#addons[@]} -eq 0 ]]; then
+            echo "::error::No compiled .node addon found under native/addon/ - native build did not produce an addon."
+            exit 1
+          fi
+          cp "${addons[@]}" dist-test/native/addon/
+          ls -la dist-test/native/addon/
+
+      # Independent sanity check on the compiled output, ahead of any sharding:
+      # confirms test:compile produced the expected number of runnable files for
+      # the exact same glob set the shard jobs will use, catching silent drift
+      # between this workflow's copied TEST_GLOBS and the real package.json script.
+      - name: Count compiled test files across TEST_GLOBS
+        shell: bash
+        run: |
+          shopt -s nullglob
+          total=0
+          for pattern in $TEST_GLOBS; do
+            # shellcheck disable=SC2206  # intentional word-splitting/globbing of a fixed glob pattern
+            files=($pattern)
+            echo "${pattern}: ${#files[@]} file(s)"
+            total=$((total + ${#files[@]}))
+          done
+          echo "Total compiled test files: ${total} (expected: ${EXPECTED_TEST_FILE_COUNT})"
+          if [[ "$total" -ne "$EXPECTED_TEST_FILE_COUNT" ]]; then
+            echo "::error::Compiled test file count (${total}) does not match expected baseline (${EXPECTED_TEST_FILE_COUNT}). TEST_GLOBS in this workflow may have drifted from gsd-pi's package.json, or the source tree changed. Refusing to proceed with sharding on an unverified file set."
+            exit 1
+          fi
+
+      - name: Package build artifact for shard jobs
+        shell: bash
+        run: |
+          tar czf build-output.tar.gz dist-test packages/*/dist
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: gsd-pi-sharded-build-output
+          path: build-output.tar.gz
+          retention-days: 1
+
+  test-shard:
+    name: test-shard (${{ matrix.shard }}/${{ inputs.shard_count }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.build.outputs.shard_matrix) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout exact commit without a token (public repo, read-only)
+        shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          repo_url="https://github.com/pimmink/gsd-pi.git"
+          target_ref="refs/heads/${SOURCE_REF}"
+
+          git init "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "$repo_url"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git -c protocol.version=2 fetch --no-tags --prune --depth=1 origin \
+            "+${target_ref}:refs/checkout-ref"
+          git checkout --force --detach refs/checkout-ref
+
+      - name: Assert HEAD matches expected_sha (fail closed)
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          head_sha="$(git rev-parse HEAD)"
+          if [[ "$head_sha" != "$EXPECTED_SHA" ]]; then
+            echo "::error::HEAD is ${head_sha}, expected ${EXPECTED_SHA}. Stopping."
+            exit 1
+          fi
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 10.12.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      # Native addon build/staging and test:compile happen exactly once, in the
+      # build job above. Dependency installation is deliberately re-run per shard
+      # (cheap and cache-backed, ~12s measured in run 31857969918) rather than
+      # trying to package and restore the full node_modules tree as an artifact.
+      - name: Install dependencies
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          GSD_SKIP_RTK_INSTALL: '1'
+          GSD_SKIP_DEP_REPAIR: '1'
+        run: pnpm install --frozen-lockfile
+
+      - name: Download build artifact
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: gsd-pi-sharded-build-output
+
+      - name: Extract build artifact
+        run: tar xzf build-output.tar.gz
+
+      # Same flags as the stable harness's "Run unit tests" step, plus --test-shard
+      # inserted immediately after --test and before the glob patterns (validated
+      # locally: placing it after the globs silently disables partitioning).
+      - name: Run test shard
+        id: run_shard
+        env:
+          GSD_NATIVE_PREFER_LOCAL: '1'
+        shell: bash
+        run: |
+          set -o pipefail
+          # shellcheck disable=SC2086  # intentional word-splitting: TEST_GLOBS holds multiple glob patterns
+          node --import ./scripts/dist-test-resolve.mjs \
+            --experimental-test-isolation=process \
+            --test-reporter=./scripts/test-reporter-compact.mjs \
+            --test --test-shard=${{ matrix.shard }}/${{ inputs.shard_count }} \
+            $TEST_GLOBS \
+            2>&1 | tee "shard-${{ matrix.shard }}.log"
+
+          summary_line="$(grep -E '^(✔|✖) [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' "shard-${{ matrix.shard }}.log" | tail -1)"
+          if [[ -z "$summary_line" ]]; then
+            echo "::error::Could not find a compact-reporter summary line in shard ${{ matrix.shard }}'s output."
+            exit 1
+          fi
+          passed="$(echo "$summary_line" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')"
+          failed="$(echo "$summary_line" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+')"
+          skipped="$(echo "$summary_line" | grep -oE '[0-9]+ skipped' | grep -oE '[0-9]+')"
+          echo "shard=${{ matrix.shard }} passed=${passed} failed=${failed} skipped=${skipped}" | tee "shard-${{ matrix.shard }}-summary.txt"
+
+      - name: Upload shard summary
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: shard-${{ matrix.shard }}-summary
+          path: shard-${{ matrix.shard }}-summary.txt
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Upload shard diagnostic log on failure
+        if: failure()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: shard-${{ matrix.shard }}-diagnostics
+          path: shard-${{ matrix.shard }}.log
+          if-no-files-found: ignore
+          retention-days: 3
+
+  lifecycle-gate:
+    name: lifecycle shadow gate (once, not sharded)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout exact commit without a token (public repo, read-only)
+        shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          repo_url="https://github.com/pimmink/gsd-pi.git"
+          target_ref="refs/heads/${SOURCE_REF}"
+
+          git init "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "$repo_url"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git -c protocol.version=2 fetch --no-tags --prune --depth=1 origin \
+            "+${target_ref}:refs/checkout-ref"
+          git checkout --force --detach refs/checkout-ref
+
+      - name: Assert HEAD matches expected_sha (fail closed)
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          head_sha="$(git rev-parse HEAD)"
+          if [[ "$head_sha" != "$EXPECTED_SHA" ]]; then
+            echo "::error::HEAD is ${head_sha}, expected ${EXPECTED_SHA}. Stopping."
+            exit 1
+          fi
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 10.12.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          GSD_SKIP_RTK_INSTALL: '1'
+          GSD_SKIP_DEP_REPAIR: '1'
+        run: pnpm install --frozen-lockfile
+
+      - name: Download build artifact
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: gsd-pi-sharded-build-output
+
+      - name: Extract build artifact
+        run: tar xzf build-output.tar.gz
+
+      - name: Run lifecycle shadow gate
+        env:
+          GSD_NATIVE_PREFER_LOCAL: '1'
+        run: pnpm run gate:lifecycle-shadow-no-cutover 2>&1 | tee "lifecycle-shadow-gate.log"
+
+      - name: Upload lifecycle gate log on failure
+        if: failure()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: lifecycle-shadow-gate-diagnostics
+          path: lifecycle-shadow-gate.log
+          if-no-files-found: ignore
+          retention-days: 3
+
+  aggregate:
+    name: aggregate shard results (fail-closed gate)
+    needs: [build, test-shard, lifecycle-gate]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Fail if any shard job did not succeed
+        if: needs.test-shard.result != 'success'
+        run: |
+          echo "::error::One or more test-shard matrix jobs did not succeed (result: ${{ needs.test-shard.result }}). See per-shard diagnostics artifacts."
+          exit 1
+
+      - name: Fail if lifecycle shadow gate did not succeed
+        if: needs.lifecycle-gate.result != 'success'
+        run: |
+          echo "::error::lifecycle-gate job did not succeed (result: ${{ needs.lifecycle-gate.result }})."
+          exit 1
+
+      - name: Download all shard summaries
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          pattern: shard-*-summary
+          path: summaries
+          merge-multiple: true
+
+      # Node's --test-shard divides the resolved file list itself, so a complete,
+      # non-overlapping partition is guaranteed by construction (validated locally
+      # with the exact same flags on a synthetic fixture). The check below proves
+      # that guarantee held for THIS real run: if any file had been skipped or run
+      # twice, the summed pass+fail+skipped total would not match the known
+      # unsharded baseline for this exact commit.
+      - name: Sum shard results and compare against known baseline
+        env:
+          EXPECTED_PASSED: ${{ inputs.expected_passed }}
+          EXPECTED_FAILED: ${{ inputs.expected_failed }}
+          EXPECTED_SKIPPED: ${{ inputs.expected_skipped }}
+          SHARD_COUNT: ${{ inputs.shard_count }}
+        run: |
+          total_passed=0
+          total_failed=0
+          total_skipped=0
+          shard_files=(summaries/shard-*-summary.txt)
+          echo "Found ${#shard_files[@]} shard summary file(s), expected ${SHARD_COUNT}."
+          if [[ ${#shard_files[@]} -ne ${SHARD_COUNT} ]]; then
+            echo "::error::Expected ${SHARD_COUNT} shard summaries, found ${#shard_files[@]}."
+            exit 1
+          fi
+          for f in "${shard_files[@]}"; do
+            cat "$f"
+            passed="$(grep -oE 'passed=[0-9]+' "$f" | cut -d= -f2)"
+            failed="$(grep -oE 'failed=[0-9]+' "$f" | cut -d= -f2)"
+            skipped="$(grep -oE 'skipped=[0-9]+' "$f" | cut -d= -f2)"
+            total_passed=$((total_passed + passed))
+            total_failed=$((total_failed + failed))
+            total_skipped=$((total_skipped + skipped))
+          done
+          echo "Aggregate: ${total_passed} passed, ${total_failed} failed, ${total_skipped} skipped"
+          echo "Expected:  ${EXPECTED_PASSED} passed, ${EXPECTED_FAILED} failed, ${EXPECTED_SKIPPED} skipped"
+          if [[ "$total_passed" -ne "$EXPECTED_PASSED" || "$total_failed" -ne "$EXPECTED_FAILED" || "$total_skipped" -ne "$EXPECTED_SKIPPED" ]]; then
+            echo "::error::Aggregate shard totals do not match the known unsharded baseline. This means at least one test file was skipped, duplicated, or genuinely regressed - treat as a hard failure, not just a mismatch."
+            exit 1
+          fi
+          echo "Aggregate totals match the known baseline exactly: no missing or duplicated test files."
+
+      - name: Write job summary
+        if: always()
+        shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          {
+            echo "### Sharded remote pr-verification summary"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| repo | ${SOURCE_REPO} |"
+            echo "| source_ref | ${SOURCE_REF} |"
+            echo "| expected_sha | ${EXPECTED_SHA} |"
+            echo "| shard_count | ${{ inputs.shard_count }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
