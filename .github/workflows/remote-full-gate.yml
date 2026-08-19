@@ -142,12 +142,42 @@ jobs:
           shared-key: gsd-pi-ci-remote-full-gate-native-linux-x64-gnu
           workspaces: native -> target
 
+      # Neither `verify:pr` nor `verify:merge` builds the native addon on their
+      # own (open-gsd/gsd-pi#1582): a genuinely fresh checkout falls back to a
+      # JS-only shim lacking test-only fault-injection hooks
+      # (setMutationBoundaryFaultForTest), failing migrate-safety-audit tests
+      # with no relation to the SHA under test. Mirrors the same step the
+      # existing remote-pr-verification.yml already carries for this reason.
+      - name: Build native addon from source (test parity, dev + fault-injection profile)
+        env:
+          RUSTFLAGS: '-C target-cpu=x86-64'
+        run: pnpm run build:native:test
+
+      - name: Compile test artifacts (pre-warm cache for the literal scripts below)
+        run: pnpm run test:compile
+
+      - name: Mirror native addon into dist-test (compiled-test loader path)
+        run: |
+          mkdir -p dist-test/native/addon
+          shopt -s nullglob
+          addons=(native/addon/*.node)
+          if [[ ${#addons[@]} -eq 0 ]]; then
+            echo "::error::No compiled .node addon found under native/addon/ - native build did not produce an addon."
+            exit 1
+          fi
+          cp "${addons[@]}" dist-test/native/addon/
+          ls -la dist-test/native/addon/
+
       # No GSD_HOME/HOME override: the GitHub-hosted runner's own $HOME is already a
       # fresh, per-run-isolated temp filesystem.
       - name: Run verify:pr (literal, unmodified script)
+        env:
+          GSD_NATIVE_PREFER_LOCAL: '1'
         run: pnpm run verify:pr 2>&1 | tee "${RUNNER_TEMP}/verify-pr.log"
 
       - name: Run verify:merge (literal, unmodified script)
+        env:
+          GSD_NATIVE_PREFER_LOCAL: '1'
         run: pnpm run verify:merge 2>&1 | tee "${RUNNER_TEMP}/verify-merge.log"
 
       - name: Write job summary
