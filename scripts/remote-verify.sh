@@ -9,9 +9,12 @@
 # terminal using only that run ID. Never prints tokens, auth output, or other secrets.
 #
 # Usage:
-#   scripts/remote-verify.sh dispatch --mode stable|sharded --source-ref <branch> \
+#   scripts/remote-verify.sh dispatch --mode stable|sharded|full-gate --source-ref <branch> \
 #       --expected-sha <40-char-sha> [--shard-count N] [--workflow-ref <ref>] \
 #       [--target-repo <owner/repo>] [--repo <owner/repo>]
+#   full-gate runs the literal, unmodified `pnpm run verify:pr` then
+#   `pnpm run verify:merge` commands (not a decomposed-scope reproduction like
+#   stable/sharded) on a clean GitHub-hosted runner.
 #   scripts/remote-verify.sh status <run-id> [--repo <owner/repo>]
 #   scripts/remote-verify.sh watch <run-id> [--repo <owner/repo>]
 #   scripts/remote-verify.sh resume <run-id> [--repo <owner/repo>]   # alias for watch
@@ -27,6 +30,7 @@ HARNESS_REPO="pimmink/gsd-pi-ci"     # where the workflows live and are dispatch
 TARGET_REPO="pimmink/gsd-pi"          # the repo whose commit is being verified
 STABLE_WORKFLOW="remote-pr-verification.yml"
 SHARDED_WORKFLOW="remote-pr-verification-sharded.yml"
+FULL_GATE_WORKFLOW="remote-full-gate.yml"
 POLL_INTERVAL_SECS=15
 DISPATCH_WAIT_TIMEOUT_SECS=60
 
@@ -66,7 +70,7 @@ parse_dispatch_args() {
     esac
   done
 
-  [[ "$MODE" == "stable" || "$MODE" == "sharded" ]] || die "--mode must be 'stable' or 'sharded', got: ${MODE:-<empty>}"
+  [[ "$MODE" == "stable" || "$MODE" == "sharded" || "$MODE" == "full-gate" ]] || die "--mode must be 'stable', 'sharded', or 'full-gate', got: ${MODE:-<empty>}"
   [[ -n "$SOURCE_REF" ]] || die "--source-ref is required"
   [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || die "--expected-sha must be a full 40-character lowercase hex SHA, got: ${EXPECTED_SHA:-<empty>}"
   [[ "$SHARD_COUNT" =~ ^[0-9]+$ ]] || die "--shard-count must be an integer"
@@ -92,6 +96,8 @@ cmd_dispatch() {
   local workflow_file
   if [[ "$MODE" == "stable" ]]; then
     workflow_file="$STABLE_WORKFLOW"
+  elif [[ "$MODE" == "full-gate" ]]; then
+    workflow_file="$FULL_GATE_WORKFLOW"
   else
     workflow_file="$SHARDED_WORKFLOW"
   fi
@@ -113,12 +119,12 @@ cmd_dispatch() {
   before_id="$(gh run list --repo "$HARNESS_REPO" --workflow "$workflow_file" --limit 1 --json databaseId --jq '.[0].databaseId // "none"' 2>/dev/null || echo none)"
 
   echo "Dispatching ${workflow_file} (workflow-ref=${WORKFLOW_REF}) against ${HARNESS_REPO} ..."
-  if [[ "$MODE" == "stable" ]]; then
-    gh workflow run "$workflow_file" --repo "$HARNESS_REPO" --ref "$WORKFLOW_REF" \
-      -f "source_ref=${SOURCE_REF}" -f "expected_sha=${EXPECTED_SHA}"
-  else
+  if [[ "$MODE" == "sharded" ]]; then
     gh workflow run "$workflow_file" --repo "$HARNESS_REPO" --ref "$WORKFLOW_REF" \
       -f "source_ref=${SOURCE_REF}" -f "expected_sha=${EXPECTED_SHA}" -f "shard_count=${SHARD_COUNT}"
+  else
+    gh workflow run "$workflow_file" --repo "$HARNESS_REPO" --ref "$WORKFLOW_REF" \
+      -f "source_ref=${SOURCE_REF}" -f "expected_sha=${EXPECTED_SHA}"
   fi
 
   echo "Waiting for GitHub to register the new run (up to ${DISPATCH_WAIT_TIMEOUT_SECS}s) ..."

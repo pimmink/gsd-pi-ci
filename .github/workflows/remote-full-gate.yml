@@ -1,0 +1,187 @@
+# gsd-pi-ci: remote literal full-gate harness for pimmink/gsd-pi.
+#
+# Unlike remote-pr-verification(.yml|-sharded.yml), which reproduce verify:pr's
+# SCOPE via decomposed steps, this workflow runs the exact, unmodified named
+# scripts `pnpm run verify:pr` and `pnpm run verify:merge` as single literal
+# commands, back to back, on a clean GitHub-hosted runner. This exists
+# specifically to produce a genuine terminal exit code for those two named
+# scripts when a contributor's local machine cannot reliably complete them
+# (e.g. severe local memory pressure), without weakening or reinterpreting
+# either script.
+#
+# Manually dispatched only (no push/pull_request triggers, ever).
+name: Remote full gate (verify:pr + verify:merge, literal)
+
+run-name: "Full gate: ${{ inputs.source_ref }} @ ${{ inputs.expected_sha }} (run #${{ github.run_number }})"
+
+"on":
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Branch in pimmink/gsd-pi to verify (e.g. fix/my-branch)'
+        required: true
+        type: string
+      expected_sha:
+        description: 'Full 40-character commit SHA that source_ref must resolve to'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_REPO: pimmink/gsd-pi
+
+concurrency:
+  group: gsd-pi-remote-full-gate-${{ inputs.source_ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-gate:
+    name: full-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Verify source_ref resolves to expected_sha (before touching any objects)
+        shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          repo_url="https://github.com/pimmink/gsd-pi.git"
+
+          if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::expected_sha must be exactly 40 lowercase hexadecimal characters, got: $EXPECTED_SHA"
+            exit 1
+          fi
+
+          if [[ -z "$SOURCE_REF" || "$SOURCE_REF" == -* || "$SOURCE_REF" == refs/* ]]; then
+            echo "::error::source_ref must be a plain branch name, not an option or full ref"
+            exit 1
+          fi
+
+          if ! git check-ref-format --branch "$SOURCE_REF" >/dev/null; then
+            echo "::error::source_ref is not a valid Git branch name"
+            exit 1
+          fi
+
+          target_ref="refs/heads/${SOURCE_REF}"
+
+          remote_matches="$(git ls-remote "$repo_url" "$target_ref")"
+          match_count="$(printf '%s\n' "$remote_matches" | grep -c .)" || match_count=0
+          if [[ "$match_count" -ne 1 ]]; then
+            echo "::error::Expected exactly one match for ${target_ref} on ${repo_url}, found ${match_count}."
+            exit 1
+          fi
+          remote_sha="$(printf '%s\n' "$remote_matches" | cut -f1)"
+
+          if [[ "$remote_sha" != "$EXPECTED_SHA" ]]; then
+            echo "::error::${target_ref} on ${repo_url} currently points at ${remote_sha}, not the expected ${EXPECTED_SHA}. Stopping before checkout."
+            exit 1
+          fi
+          echo "Pre-checkout check passed: ${target_ref} == ${EXPECTED_SHA}"
+
+      - name: Checkout exact commit without a token (public repo, read-only)
+        shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          repo_url="https://github.com/pimmink/gsd-pi.git"
+          target_ref="refs/heads/${SOURCE_REF}"
+
+          git init "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "$repo_url"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git -c protocol.version=2 fetch --no-tags --prune --depth=1 origin \
+            "+${target_ref}:refs/checkout-ref"
+          git checkout --force --detach refs/checkout-ref
+
+      - name: Assert HEAD matches expected_sha (fail closed)
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          head_sha="$(git rev-parse HEAD)"
+          if [[ "$head_sha" != "$EXPECTED_SHA" ]]; then
+            echo "::error::HEAD is ${head_sha}, expected ${EXPECTED_SHA}. Stopping."
+            exit 1
+          fi
+          echo "HEAD verified: ${head_sha}"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0 (pinned, reused from gsd-pi's ci.yml)
+        with:
+          version: 10.12.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          GSD_SKIP_RTK_INSTALL: '1'
+          GSD_SKIP_DEP_REPAIR: '1'
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Rust toolchain (native addon for tests)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable (pinned, reused from gsd-pi's ci.yml)
+
+      - name: Cache Rust build (native addon)
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (pinned, reused from gsd-pi's ci.yml)
+        with:
+          # Own namespace: must never collide with gsd-pi ci.yml's or the other
+          # gsd-pi-ci workflows' own cache keys.
+          shared-key: gsd-pi-ci-remote-full-gate-native-linux-x64-gnu
+          workspaces: native -> target
+
+      # No GSD_HOME/HOME override: the GitHub-hosted runner's own $HOME is already a
+      # fresh, per-run-isolated temp filesystem.
+      - name: Run verify:pr (literal, unmodified script)
+        run: pnpm run verify:pr 2>&1 | tee "${RUNNER_TEMP}/verify-pr.log"
+
+      - name: Run verify:merge (literal, unmodified script)
+        run: pnpm run verify:merge 2>&1 | tee "${RUNNER_TEMP}/verify-merge.log"
+
+      - name: Write job summary
+        if: always()
+        shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          JOB_STATUS: ${{ job.status }}
+          WORKFLOW_REF: ${{ github.ref_name }}
+        run: |
+          actual_sha="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD 2>/dev/null || echo unknown)"
+          {
+            echo "### Remote full-gate summary"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| repo | ${SOURCE_REPO} |"
+            echo "| source_ref | ${SOURCE_REF} |"
+            echo "| expected_sha | ${EXPECTED_SHA} |"
+            echo "| actual checked-out SHA | ${actual_sha} |"
+            echo "| workflow version/ref | ${WORKFLOW_REF} (gsd-pi-ci) |"
+            echo "| result | ${JOB_STATUS} |"
+            echo "| commands run | pnpm run verify:pr (literal); pnpm run verify:merge (literal) |"
+            echo "| run URL | ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload diagnostic logs on failure
+        if: failure()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: gsd-pi-remote-full-gate-diagnostics
+          path: |
+            ${{ runner.temp }}/verify-pr.log
+            ${{ runner.temp }}/verify-merge.log
+          if-no-files-found: ignore
+          retention-days: 3
