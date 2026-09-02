@@ -347,7 +347,7 @@ jobs:
       - name: Package build artifact for shard jobs
         shell: bash
         run: |
-          tar czf build-output.tar.gz dist-test packages/*/dist
+          tar czf build-output.tar.gz dist dist-test packages/*/dist
 
       - name: Upload build artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0

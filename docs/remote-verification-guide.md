@@ -141,6 +141,9 @@ passing sharded run as a substitute for real upstream PR/merge CI.
 - The sharded workflow's per-shard dependency install is re-run per shard (cache-backed,
   cheap) rather than packaged as part of the shared build artifact — see
   `docs/phase-2-deferral.md` for the measured cost of this tradeoff.
+- The sharded workflow's build artifact must include root `dist/` as well as
+  `dist-test/` and `packages/*/dist`: compiled tests can import root runtime build
+  artifacts such as `dist/bootstrap.js`.
 - `lifecycle-gate` runs once (not sharded) in the sharded workflow, since it is not a
   per-test-file check and sharding it would provide no benefit.
 - Dispatch is limited to `pimmink/gsd-pi` as the only verifiable target repo; both
