@@ -114,7 +114,18 @@ scripts/remote-verify.sh open <run-id>
 # Get final conclusion, duration, per-job status, and real pass/fail/skip totals
 # (plus log/artifact locations if it failed)
 scripts/remote-verify.sh logs <run-id>
+
+# Get the first failed job, first causal-looking log line, bounded classification,
+# falsifier/next check, and diagnostic artifact command
+scripts/remote-verify.sh triage <run-id>
 ```
+
+`triage` is read-only and advisory. It fetches failed-step output only after
+identifying a failed job, returns `unknown` when the evidence is insufficient,
+and never treats a log pattern as a root-cause conclusion. Its JSON includes the
+exact run URL, failed job, first causal-looking line, classification, confidence,
+falsifier/next check, and a diagnostic artifact command. Use `logs` for final
+pass/fail/skip totals; use `triage` for the first useful investigation step.
 
 `watch`/`resume` poll at a fixed interval but only print a new report when the
 job/status snapshot actually changes, so output stays compact during a long run while

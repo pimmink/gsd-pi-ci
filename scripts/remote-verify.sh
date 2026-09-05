@@ -20,6 +20,7 @@
 #   scripts/remote-verify.sh resume <run-id> [--repo <owner/repo>]   # alias for watch
 #   scripts/remote-verify.sh open <run-id> [--repo <owner/repo>]
 #   scripts/remote-verify.sh logs <run-id> [--repo <owner/repo>]     # final totals + failure log locations
+#   scripts/remote-verify.sh triage <run-id> [--repo <owner/repo>]   # first failure and bounded diagnosis
 #
 # See docs/remote-verification-guide.md for the full operational writeup.
 
@@ -215,6 +216,58 @@ cmd_open() {
   gh run view "$RUN_ID" --repo "$HARNESS_REPO" --web
 }
 
+classify_failure() {
+  local failure_text="$1"
+  if grep -qiE 'ERR_MODULE_NOT_FOUND|Cannot find module|register[A-Za-z]+ is not a function|TypeError:' <<< "$failure_text"; then
+    printf 'source-or-test-contract'
+  elif grep -qiE 'native.*addon|\.node.*not found|GSD_NATIVE_PREFER_LOCAL' <<< "$failure_text"; then
+    printf 'environment-or-native-staging'
+  elif grep -qiE 'expected_sha|HEAD is .*expected|source_ref' <<< "$failure_text"; then
+    printf 'ref-or-base-mismatch'
+  elif grep -qiE 'workflow|actionlint|yaml|permission' <<< "$failure_text"; then
+    printf 'workflow-policy'
+  else
+    printf 'unknown'
+  fi
+}
+
+cmd_triage() {
+  parse_run_id_and_repo "$@"
+  local meta failed_job failed_name failed_url failed_log first_failure classification
+  meta="$(gh run view "$RUN_ID" --repo "$HARNESS_REPO" --json status,conclusion,url,jobs)"
+  failed_job="$(printf '%s' "$meta" | node -e '
+    const run = JSON.parse(require("fs").readFileSync(0, "utf8"));
+    const job = run.jobs.find((item) => item.conclusion && item.conclusion !== "success" && item.conclusion !== "skipped");
+    process.stdout.write(JSON.stringify(job || null));
+  ')"
+
+  if [[ "$failed_job" == "null" ]]; then
+    printf '%s\n' "$meta" | node -e '
+      const run = JSON.parse(require("fs").readFileSync(0, "utf8"));
+      console.log(JSON.stringify({ status: run.status, conclusion: run.conclusion || "pending", runUrl: run.url, classification: "unknown", confidence: "none", firstCausalFailure: null, falsifier: "Wait for a completed failed job before triaging." }, null, 2));
+    '
+    return 0
+  fi
+
+  failed_name="$(printf '%s' "$failed_job" | node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0,"utf8")).name)')"
+  failed_url="$(printf '%s' "$failed_job" | node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0,"utf8")).url || "")')"
+  failed_log="$(gh run view "$RUN_ID" --repo "$HARNESS_REPO" --log-failed 2>&1 || true)"
+  first_failure="$(printf '%s\n' "$failed_log" | grep -m1 -E 'Error:|ERR_|✖|::error::|FAILED|failed:' || true)"
+  classification="$(classify_failure "$failed_log")"
+
+  node -e '
+    const [status, conclusion, runUrl, jobName, jobUrl, classification, firstFailure, runId, repo] = process.argv.slice(1);
+    const nextCheck = {
+      "source-or-test-contract": "Run the named focused test and inspect the changed entry point plus its minimal mocks.",
+      "environment-or-native-staging": "Inspect native build/staging paths; cross-check the stable remote workflow before changing source.",
+      "ref-or-base-mismatch": "Re-resolve source_ref and expected_sha; never retry with a guessed SHA.",
+      "workflow-policy": "Inspect workflow/policy changes; do not classify as source regression without a failing test.",
+      unknown: "Inspect the first failed step and diagnostic artifact; retain unknown until a narrow reproduction distinguishes the cause.",
+    };
+    console.log(JSON.stringify({ status, conclusion: conclusion || "pending", runUrl, firstFailedJob: { name: jobName, url: jobUrl || null }, firstCausalFailure: firstFailure || null, classification, confidence: classification === "unknown" ? "low" : "medium", hypothesis: "Log-only triage is advisory, not a root-cause conclusion.", falsifier: nextCheck[classification], diagnostics: `gh run download ${runId} --repo ${repo}` }, null, 2));
+  ' "$(printf '%s' "$meta" | node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0,"utf8")).status)')" "$(printf '%s' "$meta" | node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0,"utf8")).conclusion || "")')" "$(printf '%s' "$meta" | node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0,"utf8")).url)')" "$failed_name" "$failed_url" "$classification" "$first_failure" "$RUN_ID" "$HARNESS_REPO"
+}
+
 # --- logs (final totals + failure locations) ------------------------------------
 
 cmd_logs() {
@@ -279,8 +332,9 @@ main() {
     resume) cmd_resume "$@" ;;
     open) cmd_open "$@" ;;
     logs) cmd_logs "$@" ;;
+    triage) cmd_triage "$@" ;;
     -h|--help|"") usage ;;
-    *) die "unknown subcommand: $sub (expected: dispatch|status|watch|resume|open|logs)" ;;
+    *) die "unknown subcommand: $sub (expected: dispatch|status|watch|resume|open|logs|triage)" ;;
   esac
 }
 
