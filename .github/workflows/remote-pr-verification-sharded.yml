@@ -681,7 +681,25 @@ jobs:
           const records = files.flatMap((file) => JSON.parse(fs.readFileSync(path.join('timings', file), 'utf8')));
           fs.writeFileSync('timing-evidence.json', JSON.stringify({ schemaVersion: 1, sourceSha: process.env.EXPECTED_SHA, workflowSha: process.env.WORKFLOW_SHA, lockfileSha256: records[0]?.lockfileSha256, node: records[0]?.node, runnerImage: records[0]?.runnerImage, shardCount: Number(process.env.SHARD_COUNT), runId: process.env.RUN_ID, strategy: 'contiguous', records }, null, 2) + '\n');
           NODE
-          node scripts/validate-timing-evidence.mjs timing-evidence.json "$EXPECTED_SHA" "$WORKFLOW_SHA" "$RUN_ID" "$SHARD_COUNT"
+          node - <<'NODE'
+          const fs = require('fs');
+          const evidence = JSON.parse(fs.readFileSync('timing-evidence.json', 'utf8'));
+          const expected = {
+            sourceSha: process.env.EXPECTED_SHA,
+            workflowSha: process.env.WORKFLOW_SHA,
+            runId: process.env.RUN_ID,
+            shardCount: Number(process.env.SHARD_COUNT),
+          };
+          if (evidence.schemaVersion !== 1 || !Array.isArray(evidence.records) || evidence.records.length === 0) throw new Error('timing evidence must use schema 1 and contain records');
+          if (evidence.sourceSha !== expected.sourceSha || evidence.workflowSha !== expected.workflowSha || evidence.runId !== expected.runId || evidence.shardCount !== expected.shardCount || evidence.strategy !== 'contiguous') throw new Error('timing evidence top-level provenance mismatch');
+          const paths = new Set();
+          for (const record of evidence.records) {
+            if (record.sourceSha !== expected.sourceSha || record.workflowSha !== expected.workflowSha || record.runId !== expected.runId || record.schemaVersion !== 1 || record.status !== 'pass' || !Number.isFinite(record.durationMs) || record.durationMs < 0) throw new Error('timing record provenance or status mismatch');
+            if (typeof record.path !== 'string' || !record.path.startsWith('dist-test/') || paths.has(record.path)) throw new Error('timing record path is invalid or duplicated');
+            paths.add(record.path);
+          }
+          console.log(`Validated ${paths.size} timing records for ${expected.sourceSha}`);
+          NODE
 
       - name: Upload combined timing evidence
         if: ${{ inputs.collect_timings }}
