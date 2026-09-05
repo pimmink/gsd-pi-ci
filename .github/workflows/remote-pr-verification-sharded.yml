@@ -53,6 +53,11 @@ run-name: "Sharded verify: ${{ inputs.source_ref }} @ ${{ inputs.expected_sha }}
         required: false
         type: string
         default: '4'
+      collect_timings:
+        description: 'Collect per-file timing evidence in addition to the normal contiguous run'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -498,6 +503,48 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
+      - name: Collect per-file timing evidence (opt-in, contiguous strategy unchanged)
+        if: ${{ inputs.collect_timings }}
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          SHARD_COUNT: ${{ inputs.shard_count }}
+          SHARD_NUMBER: ${{ matrix.shard }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shard_file="test-manifest-shard-${SHARD_NUMBER}.txt"
+          timing_file="timings-shard-${SHARD_NUMBER}.jsonl"
+          manifest_checksum="$(cut -d' ' -f1 test-manifest.sha256)"
+          node_version="$(node --version)"
+          runner_image="${ImageOS:-unknown}:${ImageVersion:-unknown}"
+          : > "$timing_file"
+          while IFS= read -r test_file; do
+            [[ -n "$test_file" ]] || continue
+            started_ns="$(date +%s%N)"
+            status="pass"
+            if ! node --import ./scripts/dist-test-resolve.mjs \
+              --experimental-test-isolation=process \
+              --test-reporter=./scripts/test-reporter-compact.mjs \
+              --test "$test_file" > /dev/null 2>&1; then
+              status="fail"
+            fi
+            ended_ns="$(date +%s%N)"
+            duration_ms="$(( (ended_ns - started_ns) / 1000000 ))"
+            node -e 'console.log(JSON.stringify({path: process.argv[1], durationMs: Number(process.argv[2]), status: process.argv[3], sourceSha: process.argv[4], manifestSha256: process.argv[5], workflowSha: process.argv[6], lockfileSha256: process.argv[7], node: process.argv[8], runnerImage: process.argv[9], shardCount: Number(process.argv[10]), shard: Number(process.argv[11]), runId: process.argv[12], schemaVersion: 1}))' \
+              "$test_file" "$duration_ms" "$status" "$EXPECTED_SHA" "$manifest_checksum" "$WORKFLOW_SHA" "$(sha256sum pnpm-lock.yaml | cut -d' ' -f1)" "$node_version" "$runner_image" "$SHARD_COUNT" "$SHARD_NUMBER" "$RUN_ID" >> "$timing_file"
+          done < "$shard_file"
+          jq -s . "$timing_file" > "timings-shard-${SHARD_NUMBER}.json"
+
+      - name: Upload per-file timing evidence
+        if: ${{ inputs.collect_timings }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: shard-${{ matrix.shard }}-timings
+          path: timings-shard-${{ matrix.shard }}.json
+          retention-days: 7
+
   lifecycle-gate:
     name: lifecycle shadow gate (once, not sharded)
     needs: build
@@ -608,6 +655,41 @@ jobs:
           pattern: shard-*-summary
           path: summaries
           merge-multiple: true
+
+      - name: Download per-file timing evidence
+        if: ${{ inputs.collect_timings }}
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          pattern: shard-*-timings
+          path: timings
+          merge-multiple: true
+
+      - name: Validate and publish timing evidence provenance
+        if: ${{ inputs.collect_timings }}
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          SHARD_COUNT: ${{ inputs.shard_count }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const files = fs.readdirSync('timings').filter((file) => file.endsWith('.json')).sort();
+          if (files.length !== Number(process.env.SHARD_COUNT)) throw new Error(`expected ${process.env.SHARD_COUNT} timing files, found ${files.length}`);
+          const records = files.flatMap((file) => JSON.parse(fs.readFileSync(path.join('timings', file), 'utf8')));
+          fs.writeFileSync('timing-evidence.json', JSON.stringify({ schemaVersion: 1, sourceSha: process.env.EXPECTED_SHA, workflowSha: process.env.WORKFLOW_SHA, lockfileSha256: records[0]?.lockfileSha256, node: records[0]?.node, runnerImage: records[0]?.runnerImage, shardCount: Number(process.env.SHARD_COUNT), runId: process.env.RUN_ID, strategy: 'contiguous', records }, null, 2) + '\n');
+          NODE
+          node scripts/validate-timing-evidence.mjs timing-evidence.json "$EXPECTED_SHA" "$WORKFLOW_SHA" "$RUN_ID" "$SHARD_COUNT"
+
+      - name: Upload combined timing evidence
+        if: ${{ inputs.collect_timings }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: timing-evidence-${{ inputs.expected_sha }}
+          path: timing-evidence.json
+          retention-days: 14
 
       # Structural coverage proof, not a magic-number match: reassembles every shard's
       # precomputed partition and diffs the result against the canonical manifest the

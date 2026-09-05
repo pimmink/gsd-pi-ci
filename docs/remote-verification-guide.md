@@ -120,6 +120,19 @@ scripts/remote-verify.sh logs <run-id>
 scripts/remote-verify.sh triage <run-id>
 ```
 
+The sharded workflow also accepts the optional `collect_timings` dispatch input.
+It defaults to `false`, so normal contiguous shard execution is unchanged. When
+set to `true`, each shard performs an additional isolated per-file measurement
+and uploads provenance-bearing timing artifacts. These artifacts are measurement
+evidence only: they do not change test selection, pass/fail status, manifest
+validation, shard membership, or merge authority. Failed, partial, stale, or
+malformed timing evidence is rejected by `scripts/validate-timing-evidence.mjs`.
+
+Timing records are pinned to the exact source SHA, manifest checksum, workflow
+SHA, lockfile checksum, Node/runner identity, shard count, run ID, and schema
+version. New or renamed test paths therefore remain unknown until measured; the
+contiguous strategy remains the only default and automatic fallback.
+
 `triage` is read-only and advisory. It fetches failed-step output only after
 identifying a failed job, returns `unknown` when the evidence is insufficient,
 and never treats a log pattern as a root-cause conclusion. Its JSON includes the
