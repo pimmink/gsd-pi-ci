@@ -35,6 +35,16 @@ test("rejects cross-shard environment drift", () => {
   assert.throws(() => validateTimingEvidence(evidence([record(), record({ path: "dist-test/src/other.test.js", node: "v25.0.0" })]), expected, new Set([record().path, "dist-test/src/other.test.js"])));
 });
 
+test("rejects top-level environment drift", () => {
+  assert.throws(() => validateTimingEvidence(evidence([record()], { lockfileSha256: "e".repeat(64) }), expected));
+  assert.throws(() => validateTimingEvidence(evidence([record()], { runnerImage: "ubuntu25:20260901.1" }), expected));
+});
+
+test("rejects non-array records and negative durations", () => {
+  assert.throws(() => validateTimingEvidence(evidence([], { records: {} }), expected));
+  assert.throws(() => validateTimingEvidence(evidence([record({ durationMs: -1 })]), expected));
+});
+
 test("accepts multi-record exact manifest coverage", () => {
   const records = [record(), record({ path: "dist-test/src/other.test.js" })];
   assert.deepEqual(validateTimingEvidence(evidence(records), expected, new Set(records.map(({ path }) => path))), { records: 2, paths: 2 });

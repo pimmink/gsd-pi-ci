@@ -55,3 +55,29 @@ test("rejects a missing shard artifact", async () => {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("rejects too many shard artifacts", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "timing-evidence-"));
+  try {
+    await writeFile(join(directory, "timings-shard-1.json"), "[]");
+    await writeFile(join(directory, "timings-shard-2.json"), "[]");
+    await writeFile(join(directory, "timings-shard-3.json"), "[]");
+    await assert.rejects(() => assembleTimingEvidence({ timingsDir: directory, ...provenance }));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("preserves environment provenance from the first non-empty record", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "timing-evidence-"));
+  try {
+    await writeFile(join(directory, "timings-shard-1.json"), "[]");
+    await writeFile(join(directory, "timings-shard-2.json"), JSON.stringify([{ ...provenance, shard: 2, path: "dist-test/src/only.test.js", durationMs: 1, status: "pass", schemaVersion: 1 }]));
+    const evidence = await assembleTimingEvidence({ timingsDir: directory, ...provenance });
+    assert.equal(evidence.lockfileSha256, provenance.lockfileSha256);
+    assert.equal(evidence.node, provenance.node);
+    assert.equal(evidence.runnerImage, provenance.runnerImage);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 
 export function validateTimingEvidence(evidence, expected, manifestPaths) {
   const records = evidence?.records;
-  if (!evidence || evidence.schemaVersion !== 1 || !Array.isArray(records) || records.length === 0) throw new Error("timing evidence must use schema 1 and contain records");
+  if (evidence?.schemaVersion !== 1 || !Array.isArray(records) || records.length === 0) throw new Error("timing evidence must use schema 1 and contain records");
   if (evidence.sourceSha !== expected.sourceSha || evidence.workflowSha !== expected.workflowSha || evidence.runId !== expected.runId) throw new Error("timing evidence top-level provenance mismatch");
   if (evidence.shardCount !== expected.shardCount || evidence.strategy !== "contiguous" || evidence.manifestSha256 !== expected.manifestSha256) throw new Error("timing evidence strategy, shard count, or manifest mismatch");
   const paths = new Set();
