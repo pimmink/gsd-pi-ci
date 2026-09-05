@@ -123,10 +123,19 @@ scripts/remote-verify.sh triage <run-id>
 The sharded workflow also accepts the optional `collect_timings` dispatch input.
 It defaults to `false`, so normal contiguous shard execution is unchanged. When
 set to `true`, each shard performs an additional isolated per-file measurement
-and uploads provenance-bearing timing artifacts. These artifacts are measurement
-evidence only: they do not change test selection, pass/fail status, manifest
-validation, shard membership, or merge authority. Failed, partial, stale, or
-malformed timing evidence is rejected by `scripts/validate-timing-evidence.mjs`.
+and uploads provenance-bearing timing artifacts. The measurement step has its
+own timeout and is explicitly non-blocking; failed, partial, stale, or malformed
+timing evidence is diagnostic evidence only and does not fail the primary test
+aggregate. The aggregate checks the canonical manifest and dynamic test totals
+independently, so timing cannot change test selection, correctness, manifest
+validation, shard membership, or merge authority. The aggregate checks timing
+evidence with the CI checkout's `scripts/validate-timing-evidence.mjs` at the
+exact workflow SHA; only validated evidence is published.
+
+The per-file probe runs each file in a fresh process after the authoritative
+contiguous shard run. Its durations are therefore advisory relative rankings,
+not a direct measurement of parallel shard wall-clock cost. Do not enable a new
+shard strategy based on one timing run.
 
 Timing records are pinned to the exact source SHA, manifest checksum, workflow
 SHA, lockfile checksum, Node/runner identity, shard count, run ID, and schema

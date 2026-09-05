@@ -503,15 +503,87 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-      - name: Collect per-file timing evidence (opt-in, contiguous strategy unchanged)
-        if: ${{ inputs.collect_timings }}
+  timing-shard:
+    name: timing-shard (${{ matrix.shard }}/${{ inputs.shard_count }})
+    if: ${{ inputs.collect_timings }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.build.outputs.shard_matrix) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout exact commit without a token (public repo, read-only)
+        shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          repo_url="https://github.com/pimmink/gsd-pi.git"
+          target_ref="refs/heads/${SOURCE_REF}"
+          git init "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "$repo_url"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git -c protocol.version=2 fetch --no-tags --prune --depth=1 origin \
+            "+${target_ref}:refs/checkout-ref"
+          git checkout --force --detach refs/checkout-ref
+
+      - name: Assert HEAD matches expected_sha (fail closed)
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]]
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 10.12.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          GSD_SKIP_RTK_INSTALL: '1'
+          GSD_SKIP_DEP_REPAIR: '1'
+        run: pnpm install --frozen-lockfile
+
+      - name: Download and extract build artifact
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: gsd-pi-sharded-build-output
+
+      - name: Extract build artifact
+        run: tar xzf build-output.tar.gz
+
+      - name: Download test manifest
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: gsd-pi-sharded-test-manifest
+
+      - name: Verify manifest checksum before measuring
+        run: sha256sum -c test-manifest.sha256
+
+      - name: Collect per-file timing evidence (advisory only)
+        continue-on-error: true
+        timeout-minutes: 15
         env:
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           SHARD_COUNT: ${{ inputs.shard_count }}
           SHARD_NUMBER: ${{ matrix.shard }}
           WORKFLOW_SHA: ${{ github.sha }}
           RUN_ID: ${{ github.run_id }}
-        shell: bash
         run: |
           set -euo pipefail
           shard_file="test-manifest-shard-${SHARD_NUMBER}.txt"
@@ -538,11 +610,12 @@ jobs:
           jq -s . "$timing_file" > "timings-shard-${SHARD_NUMBER}.json"
 
       - name: Upload per-file timing evidence
-        if: ${{ inputs.collect_timings }}
+        if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: shard-${{ matrix.shard }}-timings
           path: timings-shard-${{ matrix.shard }}.json
+          if-no-files-found: warn
           retention-days: 7
 
   lifecycle-gate:
@@ -624,7 +697,7 @@ jobs:
 
   aggregate:
     name: aggregate shard results (fail-closed gate)
-    needs: [build, test-shard, lifecycle-gate]
+    needs: [build, test-shard, lifecycle-gate, timing-shard]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -658,14 +731,28 @@ jobs:
 
       - name: Download per-file timing evidence
         if: ${{ inputs.collect_timings }}
+        continue-on-error: true
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
         with:
           pattern: shard-*-timings
           path: timings
           merge-multiple: true
 
-      - name: Validate and publish timing evidence provenance
+      - name: Checkout CI harness at workflow SHA
         if: ${{ inputs.collect_timings }}
+        continue-on-error: true
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          path: .ci-harness
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate and publish timing evidence provenance
+        id: validate_timing
+        if: ${{ inputs.collect_timings }}
+        continue-on-error: true
         env:
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           SHARD_COUNT: ${{ inputs.shard_count }}
@@ -673,36 +760,15 @@ jobs:
           RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          node - <<'NODE'
-          const fs = require('fs');
-          const path = require('path');
-          const files = fs.readdirSync('timings').filter((file) => file.endsWith('.json')).sort();
-          if (files.length !== Number(process.env.SHARD_COUNT)) throw new Error(`expected ${process.env.SHARD_COUNT} timing files, found ${files.length}`);
-          const records = files.flatMap((file) => JSON.parse(fs.readFileSync(path.join('timings', file), 'utf8')));
-          fs.writeFileSync('timing-evidence.json', JSON.stringify({ schemaVersion: 1, sourceSha: process.env.EXPECTED_SHA, workflowSha: process.env.WORKFLOW_SHA, lockfileSha256: records[0]?.lockfileSha256, node: records[0]?.node, runnerImage: records[0]?.runnerImage, shardCount: Number(process.env.SHARD_COUNT), runId: process.env.RUN_ID, strategy: 'contiguous', records }, null, 2) + '\n');
-          NODE
-          node - <<'NODE'
-          const fs = require('fs');
-          const evidence = JSON.parse(fs.readFileSync('timing-evidence.json', 'utf8'));
-          const expected = {
-            sourceSha: process.env.EXPECTED_SHA,
-            workflowSha: process.env.WORKFLOW_SHA,
-            runId: process.env.RUN_ID,
-            shardCount: Number(process.env.SHARD_COUNT),
-          };
-          if (evidence.schemaVersion !== 1 || !Array.isArray(evidence.records) || evidence.records.length === 0) throw new Error('timing evidence must use schema 1 and contain records');
-          if (evidence.sourceSha !== expected.sourceSha || evidence.workflowSha !== expected.workflowSha || evidence.runId !== expected.runId || evidence.shardCount !== expected.shardCount || evidence.strategy !== 'contiguous') throw new Error('timing evidence top-level provenance mismatch');
-          const paths = new Set();
-          for (const record of evidence.records) {
-            if (record.sourceSha !== expected.sourceSha || record.workflowSha !== expected.workflowSha || record.runId !== expected.runId || record.schemaVersion !== 1 || record.status !== 'pass' || !Number.isFinite(record.durationMs) || record.durationMs < 0) throw new Error('timing record provenance or status mismatch');
-            if (typeof record.path !== 'string' || !record.path.startsWith('dist-test/') || paths.has(record.path)) throw new Error('timing record path is invalid or duplicated');
-            paths.add(record.path);
-          }
-          console.log(`Validated ${paths.size} timing records for ${expected.sourceSha}`);
-          NODE
+          manifest_sha256="$(cut -d' ' -f1 test-manifest.sha256)"
+          node .ci-harness/scripts/assemble-timing-evidence.mjs \
+            timings timing-evidence.json "$EXPECTED_SHA" "$WORKFLOW_SHA" "$RUN_ID" "$SHARD_COUNT" "$manifest_sha256"
+          node .ci-harness/scripts/validate-timing-evidence.mjs \
+            timing-evidence.json "$EXPECTED_SHA" "$WORKFLOW_SHA" "$RUN_ID" "$SHARD_COUNT" "$manifest_sha256" test-manifest.txt
+          echo "Timing evidence is advisory; primary test and manifest gates remain authoritative."
 
       - name: Upload combined timing evidence
-        if: ${{ inputs.collect_timings }}
+        if: ${{ inputs.collect_timings && steps.validate_timing.outcome == 'success' }}
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: timing-evidence-${{ inputs.expected_sha }}
