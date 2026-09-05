@@ -24,6 +24,23 @@ test("assembles records from every shard in deterministic filename order", async
     const evidence = await assembleTimingEvidence({ timingsDir: directory, ...provenance });
     assert.deepEqual(evidence.records.map(({ path }) => path), ["dist-test/src/one.test.js", "dist-test/src/two.test.js"]);
     assert.equal(evidence.strategy, "contiguous");
+    assert.equal(evidence.sourceSha, provenance.sourceSha);
+    assert.equal(evidence.workflowSha, provenance.workflowSha);
+    assert.equal(evidence.manifestSha256, provenance.manifestSha256);
+    assert.equal(evidence.runId, provenance.runId);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("preserves an empty shard while assembling the other shard", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "timing-evidence-"));
+  try {
+    await writeFile(join(directory, "timings-shard-1.json"), JSON.stringify([]));
+    await writeFile(join(directory, "timings-shard-2.json"), JSON.stringify([{ ...provenance, shard: 2, path: "dist-test/src/only.test.js", durationMs: 1, status: "pass", schemaVersion: 1 }]));
+    const evidence = await assembleTimingEvidence({ timingsDir: directory, ...provenance });
+    assert.equal(evidence.records.length, 1);
+    assert.equal(evidence.records[0].shard, 2);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

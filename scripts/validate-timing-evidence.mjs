@@ -9,7 +9,7 @@ export function validateTimingEvidence(evidence, expected, manifestPaths) {
   if (evidence.shardCount !== expected.shardCount || evidence.strategy !== "contiguous" || evidence.manifestSha256 !== expected.manifestSha256) throw new Error("timing evidence strategy, shard count, or manifest mismatch");
   const paths = new Set();
   const environment = { lockfileSha256: records[0]?.lockfileSha256, node: records[0]?.node, runnerImage: records[0]?.runnerImage };
-  if (Object.values(environment).some((value) => typeof value !== "string" || value.length === 0)) throw new Error("timing evidence environment provenance is incomplete");
+  if (Object.values(environment).some((value) => typeof value !== "string" || value.length === 0 || value.includes("unknown"))) throw new Error("timing evidence environment provenance is incomplete");
   if (evidence.lockfileSha256 !== environment.lockfileSha256 || evidence.node !== environment.node || evidence.runnerImage !== environment.runnerImage) throw new Error("timing evidence environment provenance mismatch");
   for (const record of records) {
     if (record.sourceSha !== expected.sourceSha || record.workflowSha !== expected.workflowSha || record.runId !== expected.runId || record.schemaVersion !== 1 || record.manifestSha256 !== expected.manifestSha256 || record.shardCount !== expected.shardCount || record.lockfileSha256 !== environment.lockfileSha256 || record.node !== environment.node || record.runnerImage !== environment.runnerImage) throw new Error("timing record provenance mismatch");

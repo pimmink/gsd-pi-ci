@@ -11,11 +11,11 @@ test("accepts complete contiguous timing evidence", () => {
   assert.deepEqual(validateTimingEvidence(evidence(), expected), { records: 1, paths: 1 });
 });
 
-for (const [name, overrides] of [["top-level source SHA", { sourceSha: "e".repeat(40) }], ["top-level shard count", { shardCount: 3 }], ["top-level strategy", { strategy: "historical-greedy" }], ["empty records", { records: [] }], ["incomplete environment", { node: "" }]]) {
+for (const [name, overrides] of [["top-level schema", { schemaVersion: 2 }], ["top-level source SHA", { sourceSha: "e".repeat(40) }], ["top-level workflow SHA", { workflowSha: "e".repeat(40) }], ["top-level run ID", { runId: "43" }], ["top-level shard count", { shardCount: 3 }], ["top-level strategy", { strategy: "historical-greedy" }], ["top-level manifest", { manifestSha256: "e".repeat(64) }], ["empty records", { records: [] }], ["incomplete environment", { node: "" }], ["unknown runner", { runnerImage: "unknown:unknown" }]]) {
   test(`rejects ${name}`, () => assert.throws(() => validateTimingEvidence(evidence([record()], overrides), expected)));
 }
 
-for (const [name, overrides] of [["stale SHA", { sourceSha: "e".repeat(40) }], ["failed measurement", { status: "fail" }], ["unsafe path", { path: "/tmp/test.js" }], ["manifest mismatch", { manifestSha256: "e".repeat(64) }], ["lockfile drift", { lockfileSha256: "e".repeat(64) }], ["missing duration", { durationMs: Number.NaN }]]) {
+for (const [name, overrides] of [["stale SHA", { sourceSha: "e".repeat(40) }], ["workflow drift", { workflowSha: "e".repeat(40) }], ["run drift", { runId: "43" }], ["schema drift", { schemaVersion: 2 }], ["shard-count drift", { shardCount: 3 }], ["failed measurement", { status: "fail" }], ["unsafe path", { path: "/tmp/test.js" }], ["manifest mismatch", { manifestSha256: "e".repeat(64) }], ["lockfile drift", { lockfileSha256: "e".repeat(64) }], ["missing duration", { durationMs: Number.NaN }]]) {
   test(`rejects ${name}`, () => assert.throws(() => validateTimingEvidence(evidence([record(overrides)]), expected)));
 }
 
