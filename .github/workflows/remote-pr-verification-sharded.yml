@@ -99,9 +99,12 @@ jobs:
         env:
           HARNESS_SHA: ${{ github.sha }}
           EXPECTED_SHA: ${{ inputs.expected_sha }}
+          SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           set -euo pipefail
-          test "$EXPECTED_SHA" = 340c0285177e3662729c9ff7e3bebc56707a1a04
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          resolved="$(git ls-remote https://github.com/pimmink/gsd-pi.git "refs/heads/$SOURCE_REF" | awk '{print $1}')"
+          test "$resolved" = "$EXPECTED_SHA"
           git init harness
           git -C harness remote add origin https://github.com/pimmink/gsd-pi-ci.git
           git -C harness fetch --depth=1 origin "$HARNESS_SHA"
@@ -125,6 +128,12 @@ jobs:
           cache-dependency-path: source/pnpm-lock.yaml
       - name: Install dependencies without lifecycle builds
         run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build only JS prerequisites for the MCP test runtime
+        run: |
+          pnpm --filter @opengsd/contracts run build
+          pnpm --filter @opengsd/rpc-client run build
+          pnpm --filter @gsd/native run build
+          pnpm --filter @opengsd/mcp-server run build
       - name: Compile test fixtures only
         run: pnpm run test:compile
       - name: Profile only MCP package at unchanged process budget
