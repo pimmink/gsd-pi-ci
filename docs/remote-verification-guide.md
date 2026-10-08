@@ -4,6 +4,33 @@ This is the canonical operational manual for `gsd-pi-ci`. Read this before dispa
 watching, or changing anything here. `AGENTS.md` is a short entry point that points here
 — it does not duplicate this content.
 
+## Dispatch preflight and bounded closeout
+
+Before every dispatch, record a small coverage table: **exact source revision**,
+**scope**, **environment/platform**, **terminal verdict and evidence URL**, and
+**checks still uncovered**. A downloadable artifact is not a test verdict.
+For this external CI repository, the workflow's `head_sha` identifies the CI
+workflow checkout, not necessarily the tested GSD Pi source; verify the separately
+pinned `expected_sha` and source checkout proof.
+
+Do not repeat a successful scope on the same source/environment just because a
+different workflow includes it. Choose the narrowest existing route covering the
+remaining package/platform/artifact boundary. If no such route exists or a literal
+named command is contractually required, state the duplicated scope and reason
+before dispatch. Do not falsely claim a package-only mode exists. Automatic
+cross-workflow receipt consumption is not implemented by these instructions.
+
+For failures, inspect the causal stack/exit metadata before changing source:
+`cancelledByParent` and compact summaries are symptoms, not diagnoses. A patch
+requires a concrete failing path and a regression check. After repeated identical
+failure, surface the blocker instead of silently retrying the same whole gate.
+
+During closeout, keep one current source/run/state and next action, with historical
+attempts separate. No new audit/coordinator or recurring copied wakeup chain unless
+the operator requests it or genuinely new evidence requires it. Preserve failed
+runs as failures; once the existing terminal verdict arrives, perform the stated
+pack/smoke/install boundary or report the concrete blocker.
+
 ## The verification tiers, and when to use which
 
 | Tier | Where | Scope | Typical time | Authority |

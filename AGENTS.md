@@ -6,6 +6,17 @@ the canonical operational manual and is not duplicated here.
 
 ## Required behavior for any agent working in this repo
 
+- Before **every new workflow dispatch**, apply the evidence-coverage preflight in
+  the canonical guide: exact source SHA, scope/environment, existing terminal
+  evidence and the remaining uncovered checks. A green unit shard aggregate is
+  not a reason to start another full unit run for artifact generation. Document
+  any unavoidable duplicate scope before dispatch, not afterward.
+- Diagnose the complete causal failure (TAP/stack/exit metadata) before patching.
+  Do not infer the cause from cancelled children or a compact failed-file summary.
+- Keep one current closeout record and one next action; separate old attempts as
+  history. Do not copy stale run prompts into a perpetual wakeup chain. Escalate
+  repeated identical failures instead of silently spending another full run.
+
 - Read `docs/remote-verification-guide.md` before dispatching, watching, or changing
   either workflow.
 - Keep targeted tests and typechecking local. Only use this repo's workflows for the
