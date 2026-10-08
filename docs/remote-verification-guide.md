@@ -80,6 +80,14 @@ always resolve it fresh with `git rev-parse HEAD` or `git ls-remote`.
 
 ## Visibility, watching, status, and resuming
 
+For focused MCP registry worker failures, the sharded workflow supports an optional
+`registry_diagnostics` boolean (default `false`). When explicitly enabled, the build
+job runs the compiled registry test file with the detailed TAP reporter before the
+unit shard matrix, with a 30-second file budget. TAP exposes the worker `exitCode`
+and `signal` that the compact spec reporter can omit. A diagnostic failure blocks
+the run; it is not a waiver or replacement for package/platform verification. Use
+the workflow ref carrying this input when dispatching an unmerged harness change.
+
 Both workflows declare a top-level `run-name:` that embeds the mode (`Stable verify:` /
 `Sharded verify:`), `source_ref`, `expected_sha`, and the GitHub run number, so a run is
 immediately distinguishable from any other run in the Actions list without opening it.
