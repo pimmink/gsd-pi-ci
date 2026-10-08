@@ -130,9 +130,11 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Build only JS prerequisites for the MCP test runtime
         run: |
-          pnpm --filter @opengsd/contracts run build
+          # Reuse the complete existing SDK graph, including native JS, pi-ai,
+          # pi-tui, agent-core and coding-agent: test transpilation alone does
+          # not produce the runtime dist/ entrypoints imported by MCP tools.
+          pnpm run build:pi
           pnpm --filter @opengsd/rpc-client run build
-          pnpm --filter @gsd/native run build
           pnpm --filter @opengsd/mcp-server run build
       - name: Compile test fixtures only
         run: pnpm run test:compile
