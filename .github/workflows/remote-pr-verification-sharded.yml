@@ -48,6 +48,11 @@ run-name: "Sharded verify: ${{ inputs.source_ref }} @ ${{ inputs.expected_sha }}
         description: 'Full 40-character commit SHA that source_ref must resolve to'
         required: true
         type: string
+      registry_diagnostics:
+        description: 'Opt-in focused MCP registry TAP diagnostics before unit shards; failures block the run'
+        required: false
+        type: boolean
+        default: false
       shard_count:
         description: 'Number of parallel test:unit:compiled shards'
         required: false
@@ -242,6 +247,17 @@ jobs:
           fi
           cp "${addons[@]}" dist-test/native/addon/
           ls -la dist-test/native/addon/
+
+      # Opt-in recovery evidence: expose worker exitCode/signal that the spec
+      # reporter hides, before spending time on the complete unit shard matrix.
+      - name: Diagnose MCP registry worker with detailed TAP
+        if: ${{ inputs.registry_diagnostics }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f dist-test/packages/mcp-server/src/pid-registry.test.js
+          node --test --test-reporter=tap --test-timeout=30000 \
+            dist-test/packages/mcp-server/src/pid-registry.test.js
 
       # Fail-closed, no hardcoded glob list: parses the ACTUAL checked-out commit's own
       # package.json "test:unit:compiled" script for its dist-test/ glob arguments. If a
