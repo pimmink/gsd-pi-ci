@@ -48,6 +48,11 @@ run-name: "Sharded verify: ${{ inputs.source_ref }} @ ${{ inputs.expected_sha }}
         description: 'Full 40-character commit SHA that source_ref must resolve to'
         required: true
         type: string
+      windows_mcp_only:
+        description: 'Diagnostic-only Windows PID registry profile; skips canonical build/shard/gate jobs'
+        required: false
+        type: boolean
+        default: false
       registry_diagnostics:
         description: 'Opt-in focused MCP registry TAP diagnostics before unit shards; failures block the run'
         required: false
@@ -80,7 +85,52 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-mcp:
+    if: ${{ inputs.windows_mcp_only }}
+    runs-on: windows-latest
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    steps:
+      - name: Fetch pinned diagnostic harness and unchanged source
+        working-directory: .
+        env:
+          HARNESS_SHA: ${{ github.sha }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          test "$EXPECTED_SHA" = 340c0285177e3662729c9ff7e3bebc56707a1a04
+          git init harness
+          git -C harness remote add origin https://github.com/pimmink/gsd-pi-ci.git
+          git -C harness fetch --depth=1 origin "$HARNESS_SHA"
+          git -C harness checkout --detach FETCH_HEAD
+          git init source
+          git -C source remote add origin https://github.com/pimmink/gsd-pi.git
+          git -C source fetch --depth=1 origin "$EXPECTED_SHA"
+          git -C source checkout --detach FETCH_HEAD
+          test "$(git -C source rev-parse HEAD)" = "$EXPECTED_SHA"
+          echo 'Scope: Windows PID registry causal profile only, NOT release acceptance.'
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: '10.12.1'
+          package_json_file: source/package.json
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: source/pnpm-lock.yaml
+      - name: Install dependencies without lifecycle builds
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Compile test fixtures only
+        run: pnpm run test:compile
+      - name: Profile only PID registry at unchanged process budget
+        run: node ../harness/scripts/windows-mcp-profile.cjs dist-test/packages/mcp-server/src/pid-registry.test.js
   build:
+    if: ${{ !inputs.windows_mcp_only }}
     name: build (once)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -740,7 +790,7 @@ jobs:
   aggregate:
     name: aggregate shard results (fail-closed gate)
     needs: [build, test-shard, lifecycle-gate, timing-shard]
-    if: always()
+    if: ${{ always() && !inputs.windows_mcp_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
