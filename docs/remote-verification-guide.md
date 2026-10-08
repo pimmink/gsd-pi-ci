@@ -7,7 +7,7 @@ watching, or changing anything here. `AGENTS.md` is a short entry point that poi
 ## The verification tiers, and when to use which
 
 | Tier | Where | Scope | Typical time | Authority |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | Local targeted loop | your laptop | only tests touching changed source (`pnpm run test:changed:src`) plus `typecheck:extensions` | seconds–minutes | fast iteration signal, not a merge gate |
 | Local `verify:pr` | your laptop | full `build:core && typecheck:extensions && test:unit && gate:lifecycle-shadow-no-cutover` | ~15–25 min, contends with local CPU/thermal limits | a personal pre-push sanity check, not authoritative — this repo's own history includes false failures caused by local resource contention (`ETIMEDOUT` fault-harness timeouts) that a clean runner does not reproduce |
 | Stable remote unsharded (`remote-pr-verification.yml`, this repo) | GitHub-hosted `ubuntu-24.04` runner, dispatched from `pimmink/gsd-pi-ci` | same scope as local `verify:pr`, run on a clean 4-core runner | ~15–20 min | trusted fallback; always available; zero baseline dependency |
