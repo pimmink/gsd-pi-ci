@@ -18,11 +18,13 @@ if (require.main === module) {
   const profileDir = resolve("mcp-diagnostic-profiles");
   fs.mkdirSync(profileDir, { recursive: true });
   const r = cp.spawnSync(process.execPath, ["--test", "--test-reporter=tap", ...targets], {
-    env: {
-      ...process.env,
-      MCP_PROFILE_DIR: profileDir,
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --require=${JSON.stringify(__filename.replaceAll("\\", "/"))}`,
-    },
+    env: process.argv.includes("--no-profile")
+      ? process.env
+      : {
+          ...process.env,
+          MCP_PROFILE_DIR: profileDir,
+          NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --require=${JSON.stringify(__filename.replaceAll("\\", "/"))}`,
+        },
     encoding: "utf8",
     timeout: 180000,
     maxBuffer: 16 * 1024 * 1024,

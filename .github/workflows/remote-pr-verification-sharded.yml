@@ -136,8 +136,8 @@ jobs:
           pnpm --filter @opengsd/mcp-server run build
       - name: Compile test fixtures only
         run: pnpm run test:compile
-      - name: Profile only MCP package at unchanged process budget
-        run: node ../harness/scripts/windows-mcp-profile.cjs dist-test/packages/mcp-server/src
+      - name: Validate uninstrumented MCP package at unchanged process budget
+        run: node ../harness/scripts/windows-mcp-profile.cjs dist-test/packages/mcp-server/src --no-profile
   build:
     if: ${{ !inputs.windows_mcp_only }}
     name: build (once)
