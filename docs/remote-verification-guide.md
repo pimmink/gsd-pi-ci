@@ -88,6 +88,15 @@ and `signal` that the compact spec reporter can omit. A diagnostic failure block
 the run; it is not a waiver or replacement for package/platform verification. Use
 the workflow ref carrying this input when dispatching an unmerged harness change.
 
+The sharded workflow also supports optional `performance_diagnostics` (default
+`false`): run the committed performance-baseline test alone with TAP before shards,
+without changing its thresholds. The shard containing that canonical test uses
+`--test-concurrency=1` so its wall-clock measurements do not compete with sibling
+test-file workers. No manifest files are removed or reassigned and the aggregate
+still requires every shard to pass. Isolation is a controlled diagnosis, not proof
+that every observed regression is caused by contention; a persistent failure must
+be investigated rather than waived or repaired by inflating the baseline.
+
 Both workflows declare a top-level `run-name:` that embeds the mode (`Stable verify:` /
 `Sharded verify:`), `source_ref`, `expected_sha`, and the GitHub run number, so a run is
 immediately distinguishable from any other run in the Actions list without opening it.
