@@ -53,6 +53,11 @@ run-name: "Sharded verify: ${{ inputs.source_ref }} @ ${{ inputs.expected_sha }}
         required: false
         type: boolean
         default: false
+      performance_diagnostics:
+        description: 'Opt-in isolated performance baseline TAP before shards; unchanged thresholds'
+        required: false
+        type: boolean
+        default: false
       shard_count:
         description: 'Number of parallel test:unit:compiled shards'
         required: false
@@ -258,6 +263,16 @@ jobs:
           test -f dist-test/packages/mcp-server/src/pid-registry.test.js
           node --test --test-reporter=tap --test-timeout=30000 \
             dist-test/packages/mcp-server/src/pid-registry.test.js
+
+      - name: Diagnose performance baseline without sibling test contention
+        if: ${{ inputs.performance_diagnostics }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --import ./scripts/dist-test-resolve.mjs \
+            --experimental-test-isolation=process --test-concurrency=1 \
+            --test-reporter=tap --test \
+            dist-test/src/tests/workflow-performance-baseline.test.js
 
       # Fail-closed, no hardcoded glob list: parses the ACTUAL checked-out commit's own
       # package.json "test:unit:compiled" script for its dist-test/ glob arguments. If a
@@ -485,8 +500,19 @@ jobs:
             exit 0
           fi
           mapfile -t shard_files < "$shard_file"
+          # Absolute latency measurements must not compete with sibling test
+          # workers. Keep every manifest file, but serialize the benchmark shard.
+          concurrency_args=()
+          for file in "${shard_files[@]}"; do
+            if [[ "$file" == 'dist-test/src/tests/workflow-performance-baseline.test.js' ]]; then
+              concurrency_args=(--test-concurrency=1)
+              echo 'Serializing benchmark-containing shard; thresholds unchanged.'
+              break
+            fi
+          done
           node --import ./scripts/dist-test-resolve.mjs \
             --experimental-test-isolation=process \
+            "${concurrency_args[@]}" \
             --test-reporter=./scripts/test-reporter-compact.mjs \
             --test "${shard_files[@]}" \
             2>&1 | tee "shard-${{ matrix.shard }}.log"
