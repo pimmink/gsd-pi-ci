@@ -49,7 +49,7 @@ run-name: "Sharded verify: ${{ inputs.source_ref }} @ ${{ inputs.expected_sha }}
         required: true
         type: string
       windows_mcp_only:
-        description: 'Diagnostic-only Windows PID registry profile; skips canonical build/shard/gate jobs'
+        description: 'Diagnostic-only Windows MCP profile; skips canonical build/shard/gate jobs'
         required: false
         type: boolean
         default: false
@@ -111,7 +111,7 @@ jobs:
           git -C source fetch --depth=1 origin "$EXPECTED_SHA"
           git -C source checkout --detach FETCH_HEAD
           test "$(git -C source rev-parse HEAD)" = "$EXPECTED_SHA"
-          echo 'Scope: Windows PID registry causal profile only, NOT release acceptance.'
+          echo 'Scope: Windows MCP package causal profile only, NOT release acceptance.'
       - name: Setup pnpm
         uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
         with:
@@ -127,8 +127,8 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Compile test fixtures only
         run: pnpm run test:compile
-      - name: Profile only PID registry at unchanged process budget
-        run: node ../harness/scripts/windows-mcp-profile.cjs dist-test/packages/mcp-server/src/pid-registry.test.js
+      - name: Profile only MCP package at unchanged process budget
+        run: node ../harness/scripts/windows-mcp-profile.cjs dist-test/packages/mcp-server/src
   build:
     if: ${{ !inputs.windows_mcp_only }}
     name: build (once)

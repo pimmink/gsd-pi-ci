@@ -6,9 +6,18 @@ const fs = require("node:fs");
 const { performance } = require("node:perf_hooks");
 if (require.main === module) {
   const target = resolve(process.argv[2]);
+  const targets = fs.statSync(target).isDirectory()
+    ? fs
+        .readdirSync(target, { recursive: true })
+        .filter((name) => name.endsWith(".test.js"))
+        .sort()
+        .map((name) => join(target, name))
+    : [target];
+  if (!targets.length) throw new Error("No MCP test files found");
+  console.error(`[MCP-DIAG] selected ${targets.length} test files; only this MCP package`);
   const profileDir = resolve("mcp-diagnostic-profiles");
   fs.mkdirSync(profileDir, { recursive: true });
-  const r = cp.spawnSync(process.execPath, ["--test", "--test-reporter=tap", target], {
+  const r = cp.spawnSync(process.execPath, ["--test", "--test-reporter=tap", ...targets], {
     env: {
       ...process.env,
       MCP_PROFILE_DIR: profileDir,
@@ -38,6 +47,40 @@ if (require.main === module) {
   };
   let calls = 0;
   let totalMs = 0;
+  process.on("uncaughtExceptionMonitor", (error) =>
+    emit(
+      `[MCP-DIAG] uncaught name=${error.name} code=${error.code || "none"} message=${String(error.message).replaceAll("\n", " ")}`,
+    ),
+  );
+  const originalSpawn = cp.spawn;
+  let writer = 0;
+  cp.spawn = function (command, args, options) {
+    // Diagnostic-only stderr routing for the eval writer otherwise hidden by
+    // stdio:ignore. Never change its code, argv, cwd, env or exit handling.
+    if (
+      command !== process.execPath ||
+      !args?.includes("--eval") ||
+      !Array.isArray(options?.stdio) ||
+      options.stdio[2] !== "ignore" ||
+      !process.env.MCP_PROFILE_DIR
+    )
+      return originalSpawn.call(this, command, args, options);
+    const fd = fs.openSync(
+      join(process.env.MCP_PROFILE_DIR, `writer-${process.pid}-${++writer}.stderr`),
+      "a",
+    );
+    try {
+      const child = originalSpawn.call(this, command, args, {
+        ...options,
+        stdio: [options.stdio[0], options.stdio[1], fd],
+      });
+      child.once("close", () => fs.closeSync(fd));
+      return child;
+    } catch (error) {
+      fs.closeSync(fd);
+      throw error;
+    }
+  };
   cp.execFileSync = function (command, args, ...rest) {
     if (!String(command).toLowerCase().endsWith("powershell.exe"))
       return original.call(this, command, args, ...rest);
