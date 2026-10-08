@@ -1,0 +1,47 @@
+name: Focused Windows MCP causal diagnostic
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows-mcp:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    steps:
+      - name: Fetch exact diagnostic harness and unchanged source
+        working-directory: .
+        env:
+          HARNESS_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git init harness
+          git -C harness remote add origin https://github.com/pimmink/gsd-pi-ci.git
+          git -C harness fetch --depth=1 origin "$HARNESS_SHA"
+          git -C harness checkout --detach FETCH_HEAD
+          git init source
+          git -C source remote add origin https://github.com/pimmink/gsd-pi.git
+          git -C source fetch --depth=1 origin 340c0285177e3662729c9ff7e3bebc56707a1a04
+          git -C source checkout --detach FETCH_HEAD
+          test "$(git -C source rev-parse HEAD)" = 340c0285177e3662729c9ff7e3bebc56707a1a04
+          echo 'Scope: Windows PID registry causal profiling only. Not canonical release acceptance.'
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: '10.12.1'
+          package_json_file: source/package.json
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: source/pnpm-lock.yaml
+      - name: Install dependencies without native source compilation
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Compile test fixtures only
+        run: pnpm run test:compile
+      - name: Profile only unchanged PID registry tests at original process budget
+        run: node ../harness/scripts/windows-mcp-profile.cjs dist-test/packages/mcp-server/src/pid-registry.test.js
