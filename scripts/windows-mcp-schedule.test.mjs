@@ -12,7 +12,7 @@ test("schedule launches heavy files first without dropping/duplicating any of 24
   ]);
   const original = [...files];
   const scheduled = scheduleTargets(files);
-  assert.equal(TEST_CONCURRENCY, 2);
+  assert.equal(TEST_CONCURRENCY, 1);
   assert.deepEqual(scheduled.slice(0, 3), files.slice(-3));
   assert.equal(scheduled.length, 24);
   assert.deepEqual([...scheduled].sort(), [...files].sort());
@@ -48,7 +48,7 @@ test("Node 24 programmatic runner preserves schedule, isolation, full TAP and fa
     const events = readFileSync(eventsFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     let active = 0; let maximum = 0;
     for (const event of events) { active += event.delta; maximum = Math.max(maximum, active); assert.notEqual(event.pid, process.pid); }
-    assert.equal(maximum, 2, "exactly two process-isolated workers, never three");
+    assert.equal(maximum, 1, "exactly one process-isolated worker; never overlap heavy files");
     assert.equal(active, 0);
     assert.equal(new Set(events.map((event) => event.pid)).size, 3);
   } finally { rmSync(dir, { recursive: true, force: true }); }
