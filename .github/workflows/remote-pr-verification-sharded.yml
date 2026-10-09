@@ -53,6 +53,11 @@ run-name: "Sharded verify: ${{ inputs.source_ref }} @ ${{ inputs.expected_sha }}
         required: false
         type: boolean
         default: false
+      state_profile_only:
+        description: 'Diagnostic-only: within windows_mcp_only, profile state-md-render.test.js causal buckets instead of the normal uninstrumented pass; has no effect unless windows_mcp_only is also true'
+        required: false
+        type: boolean
+        default: false
       registry_diagnostics:
         description: 'Opt-in focused MCP registry TAP diagnostics before unit shards; failures block the run'
         required: false
@@ -139,7 +144,11 @@ jobs:
       - name: Compile test fixtures only
         run: pnpm run test:compile
       - name: Validate uninstrumented MCP package at unchanged process budget
+        if: ${{ !inputs.state_profile_only }}
         run: node ../harness/scripts/windows-mcp-profile.cjs dist-test/packages/mcp-server/src --no-profile
+      - name: Profile STATE.md render causal buckets (diagnostic-only, single file)
+        if: ${{ inputs.state_profile_only }}
+        run: node ../harness/scripts/windows-state-probe.cjs dist-test/packages/mcp-server/src --concurrency=1 --test-name-pattern="decision, requirement"
   build:
     if: ${{ !inputs.windows_mcp_only }}
     name: build (once)
