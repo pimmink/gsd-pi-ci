@@ -140,9 +140,8 @@ if (require.main === module) {
     // stdio:ignore. Never change its code, argv, cwd, env or exit handling.
     if (
       command !== process.execPath ||
-      !args?.includes("--eval") ||
-      !Array.isArray(options?.stdio) ||
-      options.stdio[2] !== "ignore" ||
+      !args?.includes("-e") ||
+      options?.stdio?.[2] !== "ignore" ||
       !process.env.MCP_PROFILE_DIR
     )
       return originalSpawn.call(this, command, args, options);

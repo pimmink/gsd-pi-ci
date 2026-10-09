@@ -9,7 +9,7 @@
 // This test exercises the harness's own runWithLiveOutput() helper (extracted
 // so it is unit-testable without a real 180s node --test run) against a fake
 // child that writes output in two bursts with a delay between them, then is
-// killed by a short timeout. It asserts stdout is observable BEFORE the kill,
+// killed by a short timeout. It proves stdout arrives in real time before kill,
 // not only after - the defect this fix targets - and that the exact
 // production kill-signal/timeout/exit-code contract is unchanged.
 import assert from "node:assert/strict";
