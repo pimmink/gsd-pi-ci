@@ -53,6 +53,11 @@ run-name: "Sharded verify: ${{ inputs.source_ref }} @ ${{ inputs.expected_sha }}
         required: false
         type: boolean
         default: false
+      isolated_test_file:
+        description: 'Diagnostic-only one-file CPU/wall profile; only used with windows_mcp_only=true'
+        required: false
+        default: ''
+        type: string
       state_profile_only:
         description: 'Diagnostic-only: within windows_mcp_only, profile state-md-render.test.js causal buckets instead of the normal uninstrumented pass; has no effect unless windows_mcp_only is also true'
         required: false
@@ -144,11 +149,21 @@ jobs:
       - name: Compile test fixtures only
         run: pnpm run test:compile
       - name: Validate uninstrumented MCP package at unchanged process budget
-        if: ${{ !inputs.state_profile_only }}
+        if: ${{ !inputs.state_profile_only && inputs.isolated_test_file == '' }}
         run: node ../harness/scripts/windows-mcp-profile.cjs dist-test/packages/mcp-server/src --no-profile
       - name: Profile STATE.md render causal buckets (diagnostic-only, single file)
-        if: ${{ inputs.state_profile_only }}
+        if: ${{ inputs.state_profile_only && inputs.isolated_test_file == '' }}
         run: node ../harness/scripts/windows-state-probe.cjs dist-test/packages/mcp-server/src --concurrency=1 --test-name-pattern="decision, requirement"
+      - name: Profile one unfinished MCP file in isolation
+        if: ${{ inputs.isolated_test_file != '' }}
+        env:
+          TEST_FILE: ${{ inputs.isolated_test_file }}
+        run: |
+          case "$TEST_FILE" in
+            workflow-tools.test.js|workflow-tools-parity.test.js|state-md-render.test.js) ;;
+            *) echo 'Invalid isolated profile target' >&2; exit 1 ;;
+          esac
+          node ../harness/scripts/windows-mcp-isolated-profile.cjs "dist-test/packages/mcp-server/src/$TEST_FILE"
   build:
     if: ${{ !inputs.windows_mcp_only }}
     name: build (once)
