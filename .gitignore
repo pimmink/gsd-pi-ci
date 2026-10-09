@@ -1,7 +1,9 @@
 # Generated diagnostics and acceptance artifacts are evidence, not source.
 state-diagnostic-profiles/
 mcp-diagnostic-profiles/
+native-call-diagnostic-profiles/
 scripts/artifacts/
 node_modules/
 .env
 .env.*
+__pycache__/
