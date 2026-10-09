@@ -160,6 +160,10 @@ jobs:
         run: pnpm run test:compile
       - name: Validate uninstrumented MCP package at unchanged process budget
         if: ${{ !inputs.state_profile_only && !inputs.native_profile_only && inputs.isolated_test_file == '' }}
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
         run: node ../harness/scripts/windows-mcp-profile.cjs dist-test/packages/mcp-server/src --no-profile
       - name: Profile STATE.md render causal buckets (diagnostic-only, single file)
         if: ${{ inputs.state_profile_only && inputs.isolated_test_file == '' }}
