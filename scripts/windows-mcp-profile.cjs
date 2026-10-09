@@ -4,7 +4,62 @@ const { syncBuiltinESMExports } = require("node:module");
 const { resolve, join } = require("node:path");
 const fs = require("node:fs");
 const { performance } = require("node:perf_hooks");
-if (require.main === module) {
+
+// Causal fix (D227, windows-fix-20261009): the previous implementation used
+// spawnSync(), which only returns stdout/stderr to this process after the
+// child exits. Across the full 180000ms budget that means every line of TAP
+// test progress was invisible until the exact instant the timeout fired and
+// killed the child - a diagnostic that cannot tell "hung" apart from "slow
+// but steadily progressing" from the transcript, which is the actual
+// diagnostic question this harness exists to answer. runWithLiveOutput()
+// replaces spawnSync with spawn() plus a manual timeout/kill that mirrors
+// spawnSync's exact result contract (status/signal/stdout/stderr/error), so
+// output streams to the caller as it is produced while every downstream
+// consumer (the budget check, the exit-code mapping) is unchanged.
+function runWithLiveOutput(command, args, { timeout, killSignal = "SIGTERM", env, onStdout, onStderr } = {}) {
+  return new Promise((resolvePromise) => {
+    const child = cp.spawn(command, args, { env });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+    const timer =
+      timeout > 0
+        ? setTimeout(() => {
+            timedOut = true;
+            child.kill(killSignal);
+          }, timeout)
+        : null;
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      onStdout?.(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+      onStderr?.(chunk);
+    });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolvePromise({ status: null, signal: null, stdout, stderr, error });
+    });
+    child.on("close", (status, signal) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolvePromise({
+        status,
+        signal,
+        stdout,
+        stderr,
+        error: timedOut ? Object.assign(new Error("ETIMEDOUT"), { code: "ETIMEDOUT" }) : undefined,
+      });
+    });
+  });
+}
+
+async function main() {
   const target = resolve(process.argv[2]);
   const targets = fs.statSync(target).isDirectory()
     ? fs
@@ -17,7 +72,7 @@ if (require.main === module) {
   console.error(`[MCP-DIAG] selected ${targets.length} test files; only this MCP package`);
   const profileDir = resolve("mcp-diagnostic-profiles");
   fs.mkdirSync(profileDir, { recursive: true });
-  const r = cp.spawnSync(process.execPath, ["--test", "--test-reporter=tap", ...targets], {
+  const r = await runWithLiveOutput(process.execPath, ["--test", "--test-reporter=tap", ...targets], {
     env: process.argv.includes("--no-profile")
       ? process.env
       : {
@@ -25,12 +80,12 @@ if (require.main === module) {
           MCP_PROFILE_DIR: profileDir,
           NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --require=${JSON.stringify(__filename.replaceAll("\\", "/"))}`,
         },
-    encoding: "utf8",
     timeout: 180000,
-    maxBuffer: 16 * 1024 * 1024,
+    killSignal: "SIGTERM",
+    // Stream as it arrives instead of buffering silently for the full budget.
+    onStdout: (chunk) => process.stdout.write(chunk),
+    onStderr: (chunk) => process.stderr.write(chunk),
   });
-  process.stdout.write(r.stdout || "");
-  process.stderr.write(r.stderr || "");
   for (const name of fs.readdirSync(profileDir)) {
     const lines = fs.readFileSync(join(profileDir, name), "utf8").trim().split("\n");
     console.error(`[MCP-DIAG] profile=${name} events=${lines.length}`);
@@ -40,6 +95,10 @@ if (require.main === module) {
     `[MCP-DIAG] unchanged 180000ms process budget; status=${r.status} signal=${r.signal} error=${r.error?.code || "none"}`,
   );
   process.exitCode = r.status === 0 && !r.error && !r.signal ? 0 : 1;
+}
+
+if (require.main === module) {
+  main();
 } else {
   const original = cp.execFileSync;
   const emit = (line) => {
@@ -108,3 +167,5 @@ if (require.main === module) {
   };
   syncBuiltinESMExports();
 }
+
+module.exports = { runWithLiveOutput };
