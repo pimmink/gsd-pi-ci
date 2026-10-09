@@ -80,6 +80,62 @@ test("Module._load proxy wraps @gsd/native function exports with count/wall/max 
   }
 });
 
+test("ESM import of the CJS @gsd/native package is also wrapped (the actual production import shape; Module._load receives a resolved absolute path, not the bare specifier)", () => {
+  const root = mkdtempSync(join(tmpdir(), "native-profile-regression-esm-"));
+  try {
+    const nativeDir = join(root, "node_modules", "@gsd", "native", "dist");
+    mkdirSync(nativeDir, { recursive: true });
+    writeFileSync(
+      join(root, "node_modules", "@gsd", "native", "package.json"),
+      JSON.stringify({
+        name: "@gsd/native",
+        version: "0.0.0",
+        type: "commonjs",
+        main: "dist/index.js",
+        exports: { ".": "./dist/index.js", "./directory-sync": "./dist/directory-sync.js" },
+      }),
+    );
+    writeFileSync(join(nativeDir, "index.js"), "module.exports = { noop() { return 1; } };\n");
+    writeFileSync(
+      join(nativeDir, "directory-sync.js"),
+      "function syncDirectoryEntry(p) { return p.length; }\nmodule.exports = { syncDirectoryEntry };\n",
+    );
+    writeFileSync(
+      join(root, "test.mjs"),
+      [
+        "import { syncDirectoryEntry } from '@gsd/native/directory-sync';",
+        "globalThis.__NATIVE_PROFILE_PHASE__ = 'render';",
+        "syncDirectoryEntry('/tmp/abc');",
+        "syncDirectoryEntry('/tmp/de');",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(join(root, "package.json"), JSON.stringify({ type: "module" }));
+    const profileDir = join(root, "profiles");
+    mkdirSync(profileDir, { recursive: true });
+
+    execFileSync(process.execPath, [join(root, "test.mjs")], {
+      cwd: root,
+      env: {
+        ...process.env,
+        NATIVE_PROFILE_DIR: profileDir,
+        NODE_OPTIONS: `--require=${JSON.stringify(HARNESS.replaceAll("\\", "/"))}`,
+      },
+      encoding: "utf8",
+    });
+
+    const files = readdirSync(profileDir);
+    assert.equal(files.length, 1, "exactly one profile log written for the single child process");
+    const log = readFileSync(join(profileDir, files[0]), "utf8");
+
+    assert.match(log, /nativeModulesResolved=\["@gsd\/native\/dist\/directory-sync"\]/);
+    assert.match(log, /call=@gsd\/native\/dist\/directory-sync#syncDirectoryEntry count=2 wallMs=[\d.]+ maxMs=[\d.]+/);
+    assert.match(log, /phase=render calls=2 wallMs=[\d.]+/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("harness reports nativeCalls=NONE when no @gsd/native specifier is ever required", () => {
   const root = mkdtempSync(join(tmpdir(), "native-profile-regression-none-"));
   try {

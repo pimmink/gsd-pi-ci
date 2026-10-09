@@ -8,16 +8,28 @@
 // phases using markers the test file itself can emit (best-effort; absent
 // markers degrade to "unphased", never a hard failure).
 //
-// Mechanism: proxy Module._load (node:module's CJS loader entry point) so
-// every require("@gsd/native"...) resolution is intercepted exactly once per
-// module id per process. The returned export object's own property
-// descriptors are read with Object.getOwnPropertyDescriptor and reinstalled
-// unchanged (value, writable, enumerable, configurable) except that function
-// values are replaced with a timing wrapper that calls straight through to
-// the original - this preserves `typeof x === "function"`, `.length`,
-// `.name` (via Object.defineProperty with the same descriptor shape) and
-// avoids breaking instanceof/class-export patterns elsewhere in the module
-// (e.g. ProjectionRootIdentityLock, SqliteFileIdentityLock are classes/
+// Mechanism: proxy Module._load (node:module's CJS loader entry point).
+// state-md-render.test.ts is compiled/loaded as ESM, and its
+// `import { syncDirectoryEntry } from "@gsd/native/directory-sync"` goes
+// through Node's dual CJS/ESM module system - `@gsd/native` is a CommonJS
+// package (`"type": "commonjs"`), so the ESM loader's CJS-interop path still
+// calls the classic Module._load() internally to actually instantiate it.
+// The request Module._load receives at that point is the fully RESOLVED
+// filesystem path (e.g. ".../node_modules/@gsd/native/dist/directory-sync.js"),
+// not the bare "@gsd/native/directory-sync" specifier string - confirmed by a
+// standalone repro (a startsWith() match against the bare specifier silently
+// never fires for an ESM-imported CJS dependency; an includes() match against
+// the resolved path fires every time). The matcher below is `includes()` for
+// exactly this reason.
+//
+// The returned export object's own property descriptors are read with
+// Object.getOwnPropertyDescriptor and reinstalled unchanged (value, writable,
+// enumerable, configurable) except that function values are replaced with a
+// timing wrapper that calls straight through to the original - this
+// preserves `typeof x === "function"`, `.length`, `.name` (via
+// Object.defineProperty with the same descriptor shape) and avoids breaking
+// instanceof/class-export patterns elsewhere in the module (e.g.
+// ProjectionRootIdentityLock, SqliteFileIdentityLock are classes/
 // constructors - those are left completely untouched by only wrapping
 // descriptors whose value is a plain function, never anything used with
 // `new`). No .node internals, no N-API boundary code, and no production
@@ -136,8 +148,11 @@ if (require.main === module) {
     phaseEntry.totalMs += ms;
   };
 
+  const wrappedModuleObjects = new WeakSet();
   function wrapExports(moduleId, exportsObj) {
     if (!exportsObj || typeof exportsObj !== "object") return exportsObj;
+    if (wrappedModuleObjects.has(exportsObj)) return exportsObj;
+    wrappedModuleObjects.add(exportsObj);
     const descriptorNames = Object.getOwnPropertyNames(exportsObj);
     for (const name of descriptorNames) {
       const descriptor = Object.getOwnPropertyDescriptor(exportsObj, name);
@@ -173,11 +188,20 @@ if (require.main === module) {
   const originalLoad = Module._load;
   Module._load = function (request, parent, isMain) {
     const result = originalLoad.call(this, request, parent, isMain);
-    if (typeof request === "string" && request.startsWith(NATIVE_SPECIFIER_PREFIX)) {
-      if (!resolvedNativeModules.has(request)) {
-        resolvedNativeModules.add(request);
+    if (typeof request === "string" && request.includes(NATIVE_SPECIFIER_PREFIX)) {
+      // Normalize to a short, stable label for logs: whatever comes at/after
+      // the "@gsd/native" segment of the resolved path, with backslashes
+      // folded to forward slashes (Windows paths) and the .js/.node
+      // extension stripped so the same addon entry point reads identically
+      // whether it was reached via a bare specifier (CJS require) or a
+      // resolved absolute path (ESM-to-CJS interop).
+      const normalized = request.replaceAll("\\", "/");
+      const idx = normalized.indexOf(NATIVE_SPECIFIER_PREFIX);
+      const label = idx >= 0 ? normalized.slice(idx).replace(/\.(js|node|cjs)$/, "") : request;
+      if (!resolvedNativeModules.has(label)) {
+        resolvedNativeModules.add(label);
       }
-      return wrapExports(request, result);
+      return wrapExports(label, result);
     }
     return result;
   };
