@@ -564,13 +564,13 @@ jobs:
           for (const pattern of globs) {
             const dir = path.dirname(pattern);
             const base = path.basename(pattern);
-            const re = new RegExp(`^${base.split('*').map((part) => part.replace(/[.+?^${}()|[\\]\\\\]/g, '\\\\$&')).join('.*')}$`);
+            const re = new RegExp(`^${base.split('*').map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`);
             if (!fs.existsSync(dir)) throw new Error(`missing compiled performance glob directory: ${dir}`);
             for (const entry of fs.readdirSync(dir)) if (re.test(entry)) files.add(path.join(dir, entry));
           }
           const sorted = [...files].sort();
           if (!sorted.length) throw new Error('focused performance globs expanded to zero compiled files');
-          fs.writeFileSync('perf-test-manifest.txt', sorted.join('\\n') + '\\n');
+          fs.writeFileSync('perf-test-manifest.txt', sorted.join('\n') + '\n');
           console.log(`Focused performance manifest: ${sorted.length} compiled test file(s).`);
           NODE
           sha256sum perf-test-manifest.txt > perf-test-manifest.sha256

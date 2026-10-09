@@ -94,10 +94,16 @@ test("validator is staged at the pinned harness SHA and executes from the separa
     const performance = "dist-test/src/tests/performance/workflow-performance-baseline.test.js";
     writeFileSync(join(source, ordinary), "");
     writeFileSync(join(source, performance), "");
+    writeFileSync(join(source, "dist-test/src/tests/performance/not-a-test.testXjs"), "");
     writeFileSync(join(source, "test-globs.json"), JSON.stringify(["dist-test/src/tests/*.test.js"]));
     writeFileSync(join(source, "perf-test-globs.json"), JSON.stringify(["dist-test/src/tests/performance/*.test.js"]));
     writeFileSync(join(source, "test-manifest.txt"), `${ordinary}\n`);
-    writeFileSync(join(source, "perf-test-manifest.txt"), `${performance}\n`);
+    const producerStep = workflow.split("- name: Expand declared performance manifest")[1];
+    const producer = producerStep.match(/node - <<'NODE'\n([\s\S]*?)\n          NODE/)?.[1];
+    assert.ok(producer);
+    const produced = spawnSync(process.execPath, ["-e", producer], { cwd: source, encoding: "utf8" });
+    assert.equal(produced.status, 0, produced.stderr);
+    assert.equal(readFileSync(join(source, "perf-test-manifest.txt"), "utf8"), `${performance}\n`, "actual workflow producer must emit real newlines, not escaped literals");
     for (const file of ["test-manifest.txt", "perf-test-manifest.txt"]) {
       const digest = createHash("sha256").update(readFileSync(join(source, file))).digest("hex");
       writeFileSync(join(source, `${file.replace(/\.txt$/, "")}.sha256`), `${digest}  ${file}\n`);
