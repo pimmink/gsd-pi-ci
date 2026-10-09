@@ -280,6 +280,20 @@ jobs:
           fi
           echo "HEAD verified: ${head_sha}"
 
+      - name: Stage exact harness validator outside source checkout
+        working-directory: .
+        env:
+          HARNESS_SHA: ${{ github.sha }}
+          HARNESS_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git init _harness
+          git -C _harness remote add origin "https://github.com/${HARNESS_REPO}.git"
+          git -C _harness fetch --depth=1 origin "$HARNESS_SHA"
+          git -C _harness checkout --detach FETCH_HEAD
+          test "$(git -C _harness rev-parse HEAD)" = "$HARNESS_SHA"
+          test -f _harness/scripts/validate-focused-perf-manifest.mjs
+
       - name: Assert focused performance source layout
         if: ${{ inputs.focused_perf_only }}
         shell: bash
@@ -560,7 +574,7 @@ jobs:
           NODE
           sha256sum perf-test-manifest.txt > perf-test-manifest.sha256
           cat perf-test-manifest.sha256
-          node scripts/validate-focused-perf-manifest.mjs
+          node ../_harness/scripts/validate-focused-perf-manifest.mjs
 
       # Deterministic, contiguous chunking of the already-sorted canonical manifest -
       # an explicit partition (allowed as a simpler, more provable alternative to
