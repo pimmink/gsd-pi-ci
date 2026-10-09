@@ -5,7 +5,7 @@ const { tap } = require("node:test/reporters");
 const { performance } = require("node:perf_hooks");
 const { basename } = require("node:path");
 const start = performance.now();
-const tests = run({ files: process.argv.slice(2), concurrency: 3 });
+const tests = run({ files: process.argv.slice(2), concurrency: 2 });
 tests.on("test:summary", (data) => {
   console.error(`[MCP-FILE] ${JSON.stringify({
     file: data.file ? basename(data.file) : "ALL",
