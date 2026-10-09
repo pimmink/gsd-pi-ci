@@ -51,6 +51,15 @@ const { resolve, join, basename } = require("node:path");
 const { performance } = require("node:perf_hooks");
 
 const NATIVE_SPECIFIER_PREFIX = "@gsd/native";
+// gsd-pi's own test/build loader (scripts/dist-test-resolve.mjs) resolves the
+// @gsd/native workspace package to a repo-relative filesystem path that does
+// NOT contain the "@gsd/native" substring at all - e.g.
+// ".../dist-test/packages/native/dist/directory-sync/index.js" or
+// ".../packages/native/dist/directory-sync/index.js" (built-package variant,
+// see shouldUseBuiltPackageDist() in that loader). A second, independent
+// pattern catches this workspace-alias resolution shape; either pattern
+// matching is sufficient to flag and wrap the module.
+const NATIVE_WORKSPACE_PATH_PATTERN = /[\/\\]packages[\/\\]native[\/\\]dist[\/\\]/;
 
 if (require.main === module) {
   const target = resolve(process.argv[2]);
@@ -188,7 +197,10 @@ if (require.main === module) {
   const originalLoad = Module._load;
   Module._load = function (request, parent, isMain) {
     const result = originalLoad.call(this, request, parent, isMain);
-    if (typeof request === "string" && request.includes(NATIVE_SPECIFIER_PREFIX)) {
+    const isNativeModule =
+      typeof request === "string" &&
+      (request.includes(NATIVE_SPECIFIER_PREFIX) || NATIVE_WORKSPACE_PATH_PATTERN.test(request));
+    if (isNativeModule) {
       // Normalize to a short, stable label for logs: whatever comes at/after
       // the "@gsd/native" segment of the resolved path, with backslashes
       // folded to forward slashes (Windows paths) and the .js/.node
@@ -196,8 +208,14 @@ if (require.main === module) {
       // whether it was reached via a bare specifier (CJS require) or a
       // resolved absolute path (ESM-to-CJS interop).
       const normalized = request.replaceAll("\\", "/");
-      const idx = normalized.indexOf(NATIVE_SPECIFIER_PREFIX);
-      const label = idx >= 0 ? normalized.slice(idx).replace(/\.(js|node|cjs)$/, "") : request;
+      const specifierIdx = normalized.indexOf(NATIVE_SPECIFIER_PREFIX);
+      const workspaceIdx = normalized.indexOf("packages/native/dist/");
+      const label =
+        specifierIdx >= 0
+          ? normalized.slice(specifierIdx).replace(/\.(js|node|cjs)$/, "")
+          : workspaceIdx >= 0
+            ? `@gsd/native/${normalized.slice(workspaceIdx + "packages/native/dist/".length).replace(/\/index\.(js|node|cjs)$/, "").replace(/\.(js|node|cjs)$/, "")}`
+            : request;
       if (!resolvedNativeModules.has(label)) {
         resolvedNativeModules.add(label);
       }

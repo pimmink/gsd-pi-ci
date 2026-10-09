@@ -136,6 +136,50 @@ test("ESM import of the CJS @gsd/native package is also wrapped (the actual prod
   }
 });
 
+test("gsd-pi's own dist-test workspace-alias resolution shape (no '@gsd/native' substring in the resolved path at all) is also detected and labeled", () => {
+  const root = mkdtempSync(join(tmpdir(), "native-profile-regression-workspace-"));
+  try {
+    const nativeDir = join(root, "dist-test", "packages", "native", "dist", "directory-sync");
+    mkdirSync(nativeDir, { recursive: true });
+    writeFileSync(
+      join(nativeDir, "index.js"),
+      "function syncDirectoryEntry(p) { return p.length; }\nmodule.exports = { syncDirectoryEntry };\n",
+    );
+    writeFileSync(
+      join(root, "test.cjs"),
+      [
+        "const { syncDirectoryEntry } = require('./dist-test/packages/native/dist/directory-sync/index.js');",
+        "globalThis.__NATIVE_PROFILE_PHASE__ = 'render';",
+        "syncDirectoryEntry('/tmp/a');",
+        "syncDirectoryEntry('/tmp/b');",
+        "",
+      ].join("\n"),
+    );
+    const profileDir = join(root, "profiles");
+    mkdirSync(profileDir, { recursive: true });
+
+    execFileSync(process.execPath, [join(root, "test.cjs")], {
+      cwd: root,
+      env: {
+        ...process.env,
+        NATIVE_PROFILE_DIR: profileDir,
+        NODE_OPTIONS: `--require=${JSON.stringify(HARNESS.replaceAll("\\", "/"))}`,
+      },
+      encoding: "utf8",
+    });
+
+    const files = readdirSync(profileDir);
+    assert.equal(files.length, 1);
+    const log = readFileSync(join(profileDir, files[0]), "utf8");
+
+    assert.match(log, /nativeModulesResolved=\["@gsd\/native\/directory-sync"\]/);
+    assert.match(log, /call=@gsd\/native\/directory-sync#syncDirectoryEntry count=2 wallMs=[\d.]+ maxMs=[\d.]+/);
+    assert.match(log, /phase=render calls=2 wallMs=[\d.]+/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("harness reports nativeCalls=NONE when no @gsd/native specifier is ever required", () => {
   const root = mkdtempSync(join(tmpdir(), "native-profile-regression-none-"));
   try {
