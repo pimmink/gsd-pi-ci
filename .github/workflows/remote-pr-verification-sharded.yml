@@ -287,12 +287,13 @@ jobs:
           HARNESS_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          git init _harness
-          git -C _harness remote add origin "https://github.com/${HARNESS_REPO}.git"
-          git -C _harness fetch --depth=1 origin "$HARNESS_SHA"
-          git -C _harness checkout --detach FETCH_HEAD
-          test "$(git -C _harness rev-parse HEAD)" = "$HARNESS_SHA"
-          test -f _harness/scripts/validate-focused-perf-manifest.mjs
+          harness_dir="$RUNNER_TEMP/gsd-perf-harness"
+          git init "$harness_dir"
+          git -C "$harness_dir" remote add origin "https://github.com/${HARNESS_REPO}.git"
+          git -C "$harness_dir" fetch --depth=1 origin "$HARNESS_SHA"
+          git -C "$harness_dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$harness_dir" rev-parse HEAD)" = "$HARNESS_SHA"
+          test -f "$harness_dir/scripts/validate-focused-perf-manifest.mjs"
 
       - name: Assert focused performance source layout
         if: ${{ inputs.focused_perf_only }}
@@ -574,7 +575,7 @@ jobs:
           NODE
           sha256sum perf-test-manifest.txt > perf-test-manifest.sha256
           cat perf-test-manifest.sha256
-          node ../_harness/scripts/validate-focused-perf-manifest.mjs
+          node "$RUNNER_TEMP/gsd-perf-harness/scripts/validate-focused-perf-manifest.mjs"
 
       # Deterministic, contiguous chunking of the already-sorted canonical manifest -
       # an explicit partition (allowed as a simpler, more provable alternative to
