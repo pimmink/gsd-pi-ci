@@ -10,8 +10,8 @@
 #
 # Usage:
 #   scripts/remote-verify.sh dispatch --mode stable|sharded|full-gate --source-ref <branch> \
-#       --expected-sha <40-char-sha> [--shard-count N] [--workflow-ref <ref>] \
-#       [--target-repo <owner/repo>] [--repo <owner/repo>]
+#       --expected-sha <40-char-sha> [--shard-count N] [--focused-perf-only] \
+#       [--workflow-ref <ref>] [--target-repo <owner/repo>] [--repo <owner/repo>]
 #   full-gate runs the literal, unmodified `pnpm run verify:pr` then
 #   `pnpm run verify:merge` commands (not a decomposed-scope reproduction like
 #   stable/sharded) on a clean GitHub-hosted runner.
@@ -54,6 +54,7 @@ MODE=""
 SOURCE_REF=""
 EXPECTED_SHA=""
 SHARD_COUNT="4"
+FOCUSED_PERF_ONLY=false
 WORKFLOW_REF="main"
 RUN_ID=""
 
@@ -64,6 +65,7 @@ parse_dispatch_args() {
       --source-ref) SOURCE_REF="$2"; shift 2 ;;
       --expected-sha) EXPECTED_SHA="$2"; shift 2 ;;
       --shard-count) SHARD_COUNT="$2"; shift 2 ;;
+      --focused-perf-only) FOCUSED_PERF_ONLY=true; shift ;;
       --workflow-ref) WORKFLOW_REF="$2"; shift 2 ;;
       --target-repo) TARGET_REPO="$2"; shift 2 ;;
       --repo) HARNESS_REPO="$2"; shift 2 ;;
@@ -75,6 +77,9 @@ parse_dispatch_args() {
   [[ -n "$SOURCE_REF" ]] || die "--source-ref is required"
   [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || die "--expected-sha must be a full 40-character lowercase hex SHA, got: ${EXPECTED_SHA:-<empty>}"
   [[ "$SHARD_COUNT" =~ ^[0-9]+$ ]] || die "--shard-count must be an integer"
+  if [[ "$FOCUSED_PERF_ONLY" == true && "$MODE" != sharded ]]; then
+    die "--focused-perf-only is only valid with --mode sharded"
+  fi
 }
 
 parse_run_id_and_repo() {
@@ -121,8 +126,12 @@ cmd_dispatch() {
 
   echo "Dispatching ${workflow_file} (workflow-ref=${WORKFLOW_REF}) against ${HARNESS_REPO} ..."
   if [[ "$MODE" == "sharded" ]]; then
+    local focused_field=()
+    if [[ "$FOCUSED_PERF_ONLY" == true ]]; then
+      focused_field=(-f "focused_perf_only=true")
+    fi
     gh workflow run "$workflow_file" --repo "$HARNESS_REPO" --ref "$WORKFLOW_REF" \
-      -f "source_ref=${SOURCE_REF}" -f "expected_sha=${EXPECTED_SHA}" -f "shard_count=${SHARD_COUNT}"
+      -f "source_ref=${SOURCE_REF}" -f "expected_sha=${EXPECTED_SHA}" -f "shard_count=${SHARD_COUNT}" "${focused_field[@]}"
   else
     gh workflow run "$workflow_file" --repo "$HARNESS_REPO" --ref "$WORKFLOW_REF" \
       -f "source_ref=${SOURCE_REF}" -f "expected_sha=${EXPECTED_SHA}"

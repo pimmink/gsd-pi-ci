@@ -83,6 +83,11 @@ run-name: "Sharded verify: ${{ inputs.source_ref }} @ ${{ inputs.expected_sha }}
         required: false
         type: boolean
         default: false
+      focused_perf_only:
+        description: 'Focused performance preflight: canonical build plus serialized performance gate and manifest guards; skips ordinary shards, lifecycle, timings, and Windows diagnostics'
+        required: false
+        type: boolean
+        default: false
       shard_count:
         description: 'Number of parallel test:unit:compiled shards'
         required: false
@@ -106,7 +111,7 @@ concurrency:
 
 jobs:
   windows-mcp:
-    if: ${{ inputs.windows_mcp_only }}
+    if: ${{ inputs.windows_mcp_only && !inputs.focused_perf_only }}
     runs-on: windows-latest
     timeout-minutes: 12
     defaults:
@@ -197,7 +202,7 @@ jobs:
           esac
           node ../harness/scripts/windows-mcp-isolated-profile.cjs "dist-test/packages/mcp-server/src/$TEST_FILE"
   build:
-    if: ${{ !inputs.windows_mcp_only }}
+    if: ${{ !inputs.windows_mcp_only || inputs.focused_perf_only }}
     name: build (once)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -275,6 +280,18 @@ jobs:
           fi
           echo "HEAD verified: ${head_sha}"
 
+      - name: Assert focused performance source layout
+        if: ${{ inputs.focused_perf_only }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t source_tests < <(find src/tests/performance -maxdepth 1 -type f \( -name '*.test.ts' -o -name '*.test.js' \) -print | sort)
+          if [[ ${#source_tests[@]} -eq 0 ]]; then
+            echo "::error::Focused performance profile requires src/tests/performance/*.test.ts or *.test.js"
+            exit 1
+          fi
+          printf 'Focused source performance tests:\n%s\n' "${source_tests[@]}"
+
       # Written early (not just at the end) so an in-progress run is immediately
       # inspectable from the Summary tab without reading step logs.
       - name: Write initial job summary (repo, refs, checked-out SHA, workflow ref, run link)
@@ -302,6 +319,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Compute shard matrix from shard_count input
+        if: ${{ !inputs.focused_perf_only }}
         id: matrix
         shell: bash
         env:
@@ -370,10 +388,31 @@ jobs:
           cp "${addons[@]}" dist-test/native/addon/
           ls -la dist-test/native/addon/
 
+      - name: Record focused performance provenance and native hash receipt
+        if: ${{ inputs.focused_perf_only }}
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          [[ "$actual_sha" == "$EXPECTED_SHA" ]]
+          addon_hashes="$(sha256sum native/addon/*.node dist-test/native/addon/*.node)"
+          {
+            printf 'expected_sha=%s\n' "$EXPECTED_SHA"
+            printf 'actual_sha=%s\n' "$actual_sha"
+            printf 'node=%s\n' "$(node --version)"
+            printf 'pnpm=%s\n' "$(pnpm --version)"
+            printf 'rustc=%s\n' "$(rustc --version)"
+            printf 'cargo=%s\n' "$(cargo --version)"
+            printf 'lockfile_sha256=%s\n' "$(sha256sum pnpm-lock.yaml | awk '{print $1}')"
+            printf '%s\n' "$addon_hashes"
+          } | tee focused-perf-provenance.txt >> "$GITHUB_STEP_SUMMARY"
+
       # Opt-in recovery evidence: expose worker exitCode/signal that the spec
       # reporter hides, before spending time on the complete unit shard matrix.
       - name: Diagnose MCP registry worker with detailed TAP
-        if: ${{ inputs.registry_diagnostics }}
+        if: ${{ inputs.registry_diagnostics && !inputs.focused_perf_only }}
         shell: bash
         run: |
           set -euo pipefail
@@ -381,15 +420,23 @@ jobs:
           node --test --test-reporter=tap --test-timeout=30000 \
             dist-test/packages/mcp-server/src/pid-registry.test.js
 
-      - name: Diagnose performance baseline without sibling test contention
-        if: ${{ inputs.performance_diagnostics }}
+      - name: Diagnose performance tests without sibling test contention
+        if: ${{ inputs.performance_diagnostics && !inputs.focused_perf_only }}
         shell: bash
         run: |
           set -euo pipefail
+          if [[ -s perf-test-manifest.txt ]]; then
+            mapfile -t performance_tests < perf-test-manifest.txt
+          elif [[ -f dist-test/src/tests/workflow-performance-baseline.test.js ]]; then
+            # Historical commits predate test:unit:compiled:perf; retain their diagnostic path.
+            performance_tests=(dist-test/src/tests/workflow-performance-baseline.test.js)
+          else
+            echo "::error::performance_diagnostics has no declared performance manifest or legacy baseline"
+            exit 1
+          fi
           node --import ./scripts/dist-test-resolve.mjs \
             --experimental-test-isolation=process --test-concurrency=1 \
-            --test-reporter=tap --test \
-            dist-test/src/tests/workflow-performance-baseline.test.js
+            --test-reporter=tap --test "${performance_tests[@]}"
 
       # Fail-closed, no hardcoded glob list: parses the ACTUAL checked-out commit's own
       # package.json "test:unit:compiled" script for its dist-test/ glob arguments. If a
@@ -417,6 +464,33 @@ jobs:
             }
             fs.writeFileSync("test-globs.json", JSON.stringify(globs, null, 2));
             console.log(`Extracted ${globs.length} glob pattern(s) from the checked-out package.json:`);
+            for (const g of globs) console.log("  " + g);
+          '
+
+      - name: Derive performance globs from test:unit:compiled:perf when declared
+        shell: bash
+        env:
+          FOCUSED_PERF_ONLY: ${{ inputs.focused_perf_only }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const script = pkg.scripts && pkg.scripts["test:unit:compiled:perf"];
+            if (!script) {
+              if (process.env.FOCUSED_PERF_ONLY === "true") {
+                console.error("::error::focused performance profile requires test:unit:compiled:perf.");
+                process.exit(1);
+              }
+              fs.writeFileSync("perf-test-globs.json", "[]\n");
+              process.exit(0);
+            }
+            const globs = [...script.matchAll(/"(dist-test\/[^\"]+)"/g)].map((m) => m[1]);
+            if (globs.length === 0 || !globs.every((g) => /^dist-test\/src\/tests\/performance\/\*\.test\.(?:js|mjs)$/.test(g))) {
+              console.error("::error::test:unit:compiled:perf must expose only dist-test/src/tests/performance/*.test.js or *.test.mjs globs.");
+              process.exit(1);
+            }
+            fs.writeFileSync("perf-test-globs.json", JSON.stringify(globs, null, 2));
             for (const g of globs) console.log("  " + g);
           '
 
@@ -463,6 +537,31 @@ jobs:
           sha256sum test-manifest.txt > test-manifest.sha256
           cat test-manifest.sha256
 
+      - name: Expand declared performance manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+          const globs = JSON.parse(fs.readFileSync('perf-test-globs.json', 'utf8'));
+          const files = new Set();
+          for (const pattern of globs) {
+            const dir = path.dirname(pattern);
+            const base = path.basename(pattern);
+            const re = new RegExp(`^${base.split('*').map((part) => part.replace(/[.+?^${}()|[\\]\\\\]/g, '\\\\$&')).join('.*')}$`);
+            if (!fs.existsSync(dir)) throw new Error(`missing compiled performance glob directory: ${dir}`);
+            for (const entry of fs.readdirSync(dir)) if (re.test(entry)) files.add(path.join(dir, entry));
+          }
+          const sorted = [...files].sort();
+          if (!sorted.length) throw new Error('focused performance globs expanded to zero compiled files');
+          fs.writeFileSync('perf-test-manifest.txt', sorted.join('\\n') + '\\n');
+          console.log(`Focused performance manifest: ${sorted.length} compiled test file(s).`);
+          NODE
+          sha256sum perf-test-manifest.txt > perf-test-manifest.sha256
+          cat perf-test-manifest.sha256
+          node scripts/validate-focused-perf-manifest.mjs
+
       # Deterministic, contiguous chunking of the already-sorted canonical manifest -
       # an explicit partition (allowed as a simpler, more provable alternative to
       # relying on Node's own --test-shard glob-resolution across separate shard
@@ -470,6 +569,7 @@ jobs:
       # aggregate job reassembles all chunks and diffs them against the canonical
       # manifest to prove no file was omitted or duplicated.
       - name: Partition canonical manifest into shard_count deterministic chunks
+        if: ${{ !inputs.focused_perf_only }}
         shell: bash
         env:
           SHARD_COUNT: ${{ inputs.shard_count }}
@@ -498,11 +598,13 @@ jobs:
           '
 
       - name: Package build artifact for shard jobs
+        if: ${{ !inputs.focused_perf_only }}
         shell: bash
         run: |
           tar czf build-output.tar.gz dist dist-test packages/*/dist
 
       - name: Upload build artifact
+        if: ${{ !inputs.focused_perf_only }}
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: gsd-pi-sharded-build-output
@@ -510,6 +612,7 @@ jobs:
           retention-days: 1
 
       - name: Upload test manifest (canonical + per-shard partitions)
+        if: ${{ !inputs.focused_perf_only }}
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: gsd-pi-sharded-test-manifest
@@ -519,8 +622,35 @@ jobs:
             test-manifest-shard-*.txt
           retention-days: 3
 
+      - name: Run declared serialized performance gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if node -e 'process.exit(require("./package.json").scripts?.["test:unit:compiled:perf"] ? 0 : 1)'; then
+            pnpm run test:unit:compiled:perf
+          elif [[ "${{ inputs.focused_perf_only }}" == "true" ]]; then
+            echo "::error::focused performance profile requires test:unit:compiled:perf"
+            exit 1
+          else
+            echo "No performance script declared; preserving legacy ordinary profile."
+          fi
+
+      - name: Upload focused performance evidence
+        if: ${{ inputs.focused_perf_only }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: gsd-pi-focused-performance-preflight
+          path: |
+            focused-perf-provenance.txt
+            test-manifest.txt
+            test-manifest.sha256
+            perf-test-manifest.txt
+            perf-test-manifest.sha256
+          retention-days: 3
+
   test-shard:
     name: test-shard (${{ matrix.shard }}/${{ inputs.shard_count }})
+    if: ${{ !inputs.focused_perf_only }}
     needs: build
     strategy:
       fail-fast: false
@@ -664,7 +794,7 @@ jobs:
 
   timing-shard:
     name: timing-shard (${{ matrix.shard }}/${{ inputs.shard_count }})
-    if: ${{ inputs.collect_timings }}
+    if: ${{ inputs.collect_timings && !inputs.focused_perf_only }}
     needs: build
     strategy:
       fail-fast: false
@@ -779,6 +909,7 @@ jobs:
 
   lifecycle-gate:
     name: lifecycle shadow gate (once, not sharded)
+    if: ${{ !inputs.focused_perf_only }}
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -857,7 +988,7 @@ jobs:
   aggregate:
     name: aggregate shard results (fail-closed gate)
     needs: [build, test-shard, lifecycle-gate, timing-shard]
-    if: ${{ always() && !inputs.windows_mcp_only }}
+    if: ${{ always() && !inputs.windows_mcp_only && !inputs.focused_perf_only }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
