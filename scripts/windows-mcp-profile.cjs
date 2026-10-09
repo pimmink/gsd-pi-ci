@@ -61,10 +61,10 @@ function runWithLiveOutput(command, args, { timeout, killSignal = "SIGTERM", env
 }
 
 // The 4-CPU Windows runner defaults to 3 workers. The workflow file took
-// >180s under three heavy workers, but 71.7s alone (20.3s CPU). Bound the
-// I/O-heavy workload to two workers and launch the long files first.
+// >180s under concurrent heavy workers, but 71.7s alone (20.3s CPU).
+// Two workers also exhausted the budget: use measured exclusive execution.
 // Preserve process isolation, every file/assertion, and the original budget.
-const TEST_CONCURRENCY = 2;
+const TEST_CONCURRENCY = 1;
 const HEAVY_FILES = ["state-md-render.test.js", "workflow-tools.test.js", "workflow-tools-parity.test.js"];
 function scheduleTargets(targets) {
   const rank = (target) => {
