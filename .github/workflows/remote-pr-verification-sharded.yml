@@ -161,7 +161,7 @@ jobs:
         run: node ../harness/scripts/windows-state-probe.cjs dist-test/packages/mcp-server/src --concurrency=1 --test-name-pattern="decision, requirement"
       - name: Profile native addon calls and temp-storage paths (diagnostic-only, single file)
         if: ${{ inputs.native_profile_only && inputs.isolated_test_file == '' }}
-        run: node ../harness/scripts/windows-native-call-profile.cjs dist-test/packages/mcp-server/src --concurrency=1 --test-name-pattern="decision, requirement"
+        run: node ../harness/scripts/windows-native-call-profile.cjs dist-test/packages/mcp-server/src --concurrency=1
       - name: Profile one unfinished MCP file in isolation
         if: ${{ inputs.isolated_test_file != '' }}
         env:
