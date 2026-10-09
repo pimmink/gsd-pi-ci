@@ -1,12 +1,29 @@
 // Causal diagnostic only: attribute wall-clock time to @gsd/native(.node)
-// addon calls and process phases during the Windows STATE.md render test
-// file, which the prior probe (windows-state-probe.cjs) could not explain -
-// its unattributedMs=29341.2 (of wallMs=30902.4) covers everything the sync
+// addon calls, node:sqlite DatabaseSync/StatementSync calls, and process
+// phases during the Windows STATE.md render test file, which the prior
+// probe (windows-state-probe.cjs) could not explain - its
+// unattributedMs=29341.2 (of wallMs=30902.4) covers everything the sync
 // fs/child_process wrappers do not see, including native addon calls and
-// SQLite/engine waiting. This file closes exactly that gap for the native
-// addon side, and separately buckets fixture/mutation/expectedState/render
-// phases using markers the test file itself can emit (best-effort; absent
-// markers degrade to "unphased", never a hard failure).
+// SQLite/engine waiting. This file closes that gap for both the native
+// addon side and the node:sqlite side, and separately buckets
+// fixture/mutation/expectedState/render phases using markers the test file
+// itself can emit (best-effort; absent markers degrade to "unphased", never
+// a hard failure).
+//
+// SQLite instrumentation (2026-10-09 extension): the prior native-call pass
+// (run 37886693142) proved @gsd/native addon calls account for only ~1.9s of
+// the 83.9s STATE test file - the addon layer is not the bottleneck.
+// Production loads SQLite via a bare `createRequire(...).require("node:sqlite")`
+// (unit-ownership.ts's tryRequireNodeSqlite), which resolves as the literal
+// string "node:sqlite" at Module._load - confirmed locally (unlike the
+// @gsd/native case, this is a builtin module id, never a resolved
+// filesystem path under any import shape). The wrapper below intercepts
+// exactly that id, wraps DatabaseSync (constructor/exec/prepare/close) and
+// the StatementSync instances prepare() returns (run/get/all), and records
+// counts + wall/max time only - never SQL text, parameters, bound values,
+// row data, or file paths. Mirrors the native-call wrapper's shape
+// (Map-based call stats, phase-label bucketing, one summary line per
+// call-site on process exit) so logs read identically.
 //
 // Mechanism: proxy Module._load (node:module's CJS loader entry point).
 // state-md-render.test.ts is compiled/loaded as ESM, and its
@@ -39,7 +56,15 @@
 //
 // Usage (parent process, same contract as windows-state-probe.cjs):
 //   node windows-native-call-profile.cjs <dist-test-dir-or-file> \
-//     [--test-name-pattern=<regex>] [--concurrency=1]
+//     [--test-name-pattern=<regex>] [--concurrency=1] [--relocate-temp=<dir>]
+//
+// --relocate-temp=<dir> is an opt-in diagnostic: when set, the child
+// process's TEMP/TMP (and TMPDIR, for completeness on non-Windows) env vars
+// are overridden to <dir> instead of inheriting the parent's. This exists to
+// paired-compare the default C: runner temp against the existing
+// RUNNER_TEMP directory on D: on Windows runners, without touching any
+// production default or pragma. Absent this flag, TEMP/TMP are inherited
+// unchanged exactly as before.
 //
 // Unchanged 180000ms process budget. Diagnostic-only; never substitutes for
 // or skips the canonical run.
@@ -65,8 +90,11 @@ if (require.main === module) {
   const target = resolve(process.argv[2]);
   const namePatternArg = process.argv.find((a) => a.startsWith("--test-name-pattern="));
   const concurrencyArg = process.argv.find((a) => a.startsWith("--concurrency="));
+  const relocateTempArg = process.argv.find((a) => a.startsWith("--relocate-temp="));
   const testNamePattern = namePatternArg ? namePatternArg.slice("--test-name-pattern=".length) : undefined;
   const testConcurrency = concurrencyArg ? concurrencyArg.slice("--concurrency=".length) : undefined;
+  const relocateTempDir = relocateTempArg ? relocateTempArg.slice("--relocate-temp=".length) : undefined;
+  if (relocateTempDir) fs.mkdirSync(relocateTempDir, { recursive: true });
 
   const targetIsDir = fs.statSync(target).isDirectory();
   const targets = targetIsDir
@@ -88,7 +116,12 @@ if (require.main === module) {
   console.error(`[NATIVE-PROFILE] selected file=${targets[0]}`);
   console.error(`[NATIVE-PROFILE] os.tmpdir()=${os.tmpdir()}`);
   console.error(`[NATIVE-PROFILE] RUNNER_TEMP=${process.env.RUNNER_TEMP || "(unset)"}`);
-  console.error(`[NATIVE-PROFILE] TEMP=${process.env.TEMP || "(unset)"} TMP=${process.env.TMP || "(unset)"}`);
+  console.error(`[NATIVE-PROFILE] TEMP(baseline)=${process.env.TEMP || "(unset)"} TMP(baseline)=${process.env.TMP || "(unset)"}`);
+  if (relocateTempDir) {
+    console.error(`[NATIVE-PROFILE] relocate-temp active: child TEMP/TMP/TMPDIR=${relocateTempDir}`);
+  } else {
+    console.error(`[NATIVE-PROFILE] relocate-temp not set; child inherits parent TEMP/TMP unchanged`);
+  }
   if (testNamePattern) console.error(`[NATIVE-PROFILE] test-name-pattern=${testNamePattern}`);
 
   const profileDir = resolve("native-call-diagnostic-profiles");
@@ -105,6 +138,9 @@ if (require.main === module) {
       ...process.env,
       NATIVE_PROFILE_DIR: profileDir,
       NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --require=${JSON.stringify(__filename.replaceAll("\\", "/"))}`,
+      ...(relocateTempDir
+        ? { TEMP: relocateTempDir, TMP: relocateTempDir, TMPDIR: relocateTempDir }
+        : {}),
     },
     encoding: "utf8",
     timeout: 180000,
@@ -195,8 +231,73 @@ if (require.main === module) {
   }
 
   const originalLoad = Module._load;
+  let sqliteWrapped = false;
+  function wrapSqliteModule(mod) {
+    if (sqliteWrapped) return mod;
+    if (!mod || typeof mod !== "object" || typeof mod.DatabaseSync !== "function") return mod;
+    sqliteWrapped = true;
+    const OrigDatabaseSync = mod.DatabaseSync;
+
+    function timeMethod(key, target, methodName) {
+      const orig = target[methodName];
+      if (typeof orig !== "function") return;
+      target[methodName] = function (...callArgs) {
+        const t0 = performance.now();
+        try {
+          return orig.apply(this, callArgs);
+        } finally {
+          record(key, performance.now() - t0);
+        }
+      };
+    }
+
+    function WrappedDatabaseSync(...ctorArgs) {
+      const t0 = performance.now();
+      const instance = new OrigDatabaseSync(...ctorArgs);
+      record("DatabaseSync#constructor", performance.now() - t0);
+      timeMethod("DatabaseSync#exec", instance, "exec");
+      timeMethod("DatabaseSync#close", instance, "close");
+      const origPrepare = instance.prepare;
+      if (typeof origPrepare === "function") {
+        instance.prepare = function (...prepareArgs) {
+          const t1 = performance.now();
+          const stmt = origPrepare.apply(this, prepareArgs);
+          record("DatabaseSync#prepare", performance.now() - t1);
+          timeMethod("StatementSync#run", stmt, "run");
+          timeMethod("StatementSync#get", stmt, "get");
+          timeMethod("StatementSync#all", stmt, "all");
+          return stmt;
+        };
+      }
+      return instance;
+    }
+    WrappedDatabaseSync.prototype = OrigDatabaseSync.prototype;
+
+    const wrappedMod = Object.create(Object.getPrototypeOf(mod));
+    for (const name of Object.getOwnPropertyNames(mod)) {
+      const descriptor = Object.getOwnPropertyDescriptor(mod, name);
+      if (name === "DatabaseSync") {
+        try {
+          Object.defineProperty(wrappedMod, name, { ...descriptor, value: WrappedDatabaseSync });
+          continue;
+        } catch {
+          // Fall through to copy the original descriptor unwrapped below.
+        }
+      }
+      try {
+        Object.defineProperty(wrappedMod, name, descriptor);
+      } catch {
+        // Best-effort only.
+      }
+    }
+    return wrappedMod;
+  }
+
   Module._load = function (request, parent, isMain) {
     const result = originalLoad.call(this, request, parent, isMain);
+    if (request === "node:sqlite") {
+      return wrapSqliteModule(result);
+    }
     const isNativeModule =
       typeof request === "string" &&
       (request.includes(NATIVE_SPECIFIER_PREFIX) || NATIVE_WORKSPACE_PATH_PATTERN.test(request));
@@ -234,6 +335,7 @@ if (require.main === module) {
     if (callStats.size === 0) {
       lines.push(`[NATIVE-PROFILE] pid=${process.pid} nativeCalls=NONE (no @gsd/native export was invoked in this process)`);
     }
+    lines.push(`[NATIVE-PROFILE] pid=${process.pid} sqliteWrapped=${sqliteWrapped}`);
     for (const [label, entry] of phaseStats.entries()) {
       lines.push(`[NATIVE-PROFILE] pid=${process.pid} phase=${label} calls=${entry.calls} wallMs=${entry.totalMs.toFixed(3)}`);
     }

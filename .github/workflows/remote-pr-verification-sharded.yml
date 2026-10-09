@@ -68,6 +68,11 @@ run-name: "Sharded verify: ${{ inputs.source_ref }} @ ${{ inputs.expected_sha }}
         required: false
         type: boolean
         default: false
+      sqlite_temp_comparison_only:
+        description: 'Diagnostic-only: within windows_mcp_only + native_profile_only, run one paired comparison of state-md-render.test.js with default C: temp vs the existing RUNNER_TEMP directory on D:, both instrumented for node:sqlite DatabaseSync/StatementSync call attribution; has no effect unless windows_mcp_only and native_profile_only are both true'
+        required: false
+        type: boolean
+        default: false
       registry_diagnostics:
         description: 'Opt-in focused MCP registry TAP diagnostics before unit shards; failures block the run'
         required: false
@@ -160,8 +165,23 @@ jobs:
         if: ${{ inputs.state_profile_only && inputs.isolated_test_file == '' }}
         run: node ../harness/scripts/windows-state-probe.cjs dist-test/packages/mcp-server/src --concurrency=1 --test-name-pattern="decision, requirement"
       - name: Profile native addon calls and temp-storage paths (diagnostic-only, single file)
-        if: ${{ inputs.native_profile_only && inputs.isolated_test_file == '' }}
+        if: ${{ inputs.native_profile_only && !inputs.sqlite_temp_comparison_only && inputs.isolated_test_file == '' }}
         run: node ../harness/scripts/windows-native-call-profile.cjs dist-test/packages/mcp-server/src --concurrency=1
+      - name: "Paired comparison: default C: temp (baseline, node:sqlite + native addon instrumented)"
+        if: ${{ inputs.native_profile_only && inputs.sqlite_temp_comparison_only && inputs.isolated_test_file == '' }}
+        shell: bash
+        run: |
+          echo "::group::Baseline run (default C: temp, unchanged)"
+          node ../harness/scripts/windows-native-call-profile.cjs dist-test/packages/mcp-server/src --concurrency=1
+          echo "::endgroup::"
+      - name: "Paired comparison: relocated D: RUNNER_TEMP (node:sqlite + native addon instrumented)"
+        if: ${{ inputs.native_profile_only && inputs.sqlite_temp_comparison_only && inputs.isolated_test_file == '' }}
+        shell: bash
+        run: |
+          echo "::group::Relocated run (existing RUNNER_TEMP directory on D:)"
+          echo "RUNNER_TEMP=${RUNNER_TEMP}"
+          node ../harness/scripts/windows-native-call-profile.cjs dist-test/packages/mcp-server/src --concurrency=1 "--relocate-temp=${RUNNER_TEMP}"
+          echo "::endgroup::"
       - name: Profile one unfinished MCP file in isolation
         if: ${{ inputs.isolated_test_file != '' }}
         env:
