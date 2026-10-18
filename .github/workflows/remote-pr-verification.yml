@@ -27,6 +27,11 @@ run-name: "Stable verify: ${{ inputs.source_ref }} @ ${{ inputs.expected_sha }} 
         description: 'Full 40-character commit SHA that source_ref must resolve to'
         required: true
         type: string
+      package_release:
+        description: 'After all checks pass, build the web distribution and upload a source-bound fork archive'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -207,6 +212,60 @@ jobs:
         env:
           GSD_NATIVE_PREFER_LOCAL: '1'
         run: pnpm run gate:lifecycle-shadow-no-cutover 2>&1 | tee "${RUNNER_TEMP}/lifecycle-shadow-gate.log"
+
+      # Opt-in distribution build stays online and cannot run after a failed gate.
+      # No permissions or trust checks are broadened; the source remains SHA-pinned.
+      - name: Build and package verified fork release
+        if: ${{ inputs.package_release }}
+        env:
+          EXPECTED_RELEASE_SHA: ${{ inputs.expected_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_RELEASE_SHA"
+          git diff --exit-code
+          node scripts/build-web-if-stale.cjs
+          git diff --exit-code
+          mkdir -p "${RUNNER_TEMP}/fork-release"
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const pkg = require('./package.json');
+          const manifest = require('./fork-release-manifest.json');
+          if (pkg.version !== manifest.version) throw new Error('Release manifest/version mismatch');
+          fs.writeFileSync('dist/fork-release.json', JSON.stringify({
+            version: pkg.version,
+            sourceSha: process.env.EXPECTED_RELEASE_SHA,
+            upstreamBase: manifest.upstreamBase,
+            nativeEngineVersion: manifest.nativeEngineVersion,
+          }, null, 2) + '\n');
+          NODE
+          pnpm pack --pack-destination "${RUNNER_TEMP}/fork-release"
+          git diff --exit-code
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const crypto = require('node:crypto');
+          const dir = path.join(process.env.RUNNER_TEMP, 'fork-release');
+          const names = fs.readdirSync(dir).filter(name => name.endsWith('.tgz'));
+          if (names.length !== 1) throw new Error('Expected one release archive');
+          const pkg = require('./package.json');
+          const proof = {
+            version: pkg.version,
+            sourceSha: process.env.EXPECTED_RELEASE_SHA,
+            archive: names[0],
+            sha256: crypto.createHash('sha256').update(fs.readFileSync(path.join(dir, names[0]))).digest('hex'),
+            webBuiltOnline: true,
+            testsPassedBeforePackaging: true,
+          };
+          fs.writeFileSync(path.join(dir, 'release-proof.json'), JSON.stringify(proof, null, 2) + '\n');
+          NODE
+
+      - name: Upload verified fork release
+        if: ${{ success() && inputs.package_release }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: gsd-pi-verified-fork-release
+          path: ${{ runner.temp }}/fork-release/
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Write job summary
         if: always()
