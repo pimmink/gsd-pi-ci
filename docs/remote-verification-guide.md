@@ -1,3 +1,5 @@
+<!-- markdownlint-disable MD013 -->
+
 # Remote verification guide (canonical)
 
 This is the canonical operational manual for `gsd-pi-ci`. Read this before dispatching,
@@ -7,12 +9,20 @@ watching, or changing anything here. `AGENTS.md` is a short entry point that poi
 ## The verification tiers, and when to use which
 
 | Tier | Where | Scope | Typical time | Authority |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | Local targeted loop | your laptop | only tests touching changed source (`pnpm run test:changed:src`) plus `typecheck:extensions` | seconds–minutes | fast iteration signal, not a merge gate |
 | Local `verify:pr` | your laptop | full `build:core && typecheck:extensions && test:unit && gate:lifecycle-shadow-no-cutover` | ~15–25 min, contends with local CPU/thermal limits | a personal pre-push sanity check, not authoritative — this repo's own history includes false failures caused by local resource contention (`ETIMEDOUT` fault-harness timeouts) that a clean runner does not reproduce |
 | Stable remote unsharded (`remote-pr-verification.yml`, this repo) | GitHub-hosted `ubuntu-24.04` runner, dispatched from `pimmink/gsd-pi-ci` | same scope as local `verify:pr`, run on a clean 4-core runner | ~15–20 min | trusted fallback; always available; zero baseline dependency |
 | Generalized sharded remote (`remote-pr-verification-sharded.yml`, this repo) | same runner class, 4 (configurable) parallel shards | same scope, split across shards for wall-clock reduction | ~10–13 min end-to-end | primary remote tier once a branch is stable enough to push; branch/test-count agnostic |
 | Real upstream PR/merge CI (`pimmink/gsd-pi`'s own `.github/workflows/ci.yml`, after a PR is opened) | GitHub-hosted runners under `open-gsd/gsd-pi` or `pimmink/gsd-pi` | the actual blocking gate: `build` (Linux), `windows-portability`, `node22-smoke`, conditional Docker e2e | varies | **the only authoritative merge signal** — nothing in this repo is a substitute for it |
+
+An additional **opt-in artifact-only** path on `remote-pr-verification.yml`
+(`owned_runtime_only=true`, default false) builds a self-contained darwin/x64 core
+runtime on `macos-15-intel`. It skips ordinary verification and is **not** another
+verification tier. See [Owned core-runtime artifacts](owned-runtime-artifacts.md)
+for the exact source/workflow pin distinction, 14-day artifact contract, safe verifier,
+security tests, and parent-owned dispatch/download/launch commands. Ordinary dispatches
+and their branch-equality behavior are unchanged.
 
 Nothing in this repository is merge-parity. `windows-portability`, `node22-smoke`, and
 the conditional Docker e2e job remain out of scope for both workflows here — see
@@ -66,7 +76,8 @@ here before.
 
 ## Exact SHA pinning (never guess a SHA)
 
-Both workflows require `source_ref` (a plain branch name) and `expected_sha` (a full
+For ordinary verification (not the explicit artifact-only exception documented above),
+both workflows require `source_ref` (a plain branch name) and `expected_sha` (a full
 40-character lowercase hex commit SHA) as `workflow_dispatch` inputs, and both verify —
 via `git ls-remote` against the live repo, before touching any objects — that
 `source_ref` currently resolves to exactly `expected_sha` on `pimmink/gsd-pi`. If they
@@ -81,7 +92,8 @@ always resolve it fresh with `git rev-parse HEAD` or `git ls-remote`.
 ## Visibility, watching, status, and resuming
 
 Both workflows declare a top-level `run-name:` that embeds the mode (`Stable verify:` /
-`Sharded verify:`), `source_ref`, `expected_sha`, and the GitHub run number, so a run is
+`Sharded verify:`; `Owned runtime:` for the opt-in artifact path), `source_ref`,
+`expected_sha`, and the GitHub run number, so a run is
 immediately distinguishable from any other run in the Actions list without opening it.
 Both also write a job summary at the very start (source repo, source_ref, expected_sha,
 actual checked-out SHA, workflow version/ref, shard count where applicable, and a

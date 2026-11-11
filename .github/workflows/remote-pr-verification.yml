@@ -14,7 +14,7 @@
 # docs/phase-2-deferral.md for why and what would need to change first.
 name: Remote PR verification (gsd-pi)
 
-run-name: "Stable verify: ${{ inputs.source_ref }} @ ${{ inputs.expected_sha }} (run #${{ github.run_number }})"
+run-name: "${{ inputs.owned_runtime_only && 'Owned runtime' || 'Stable verify' }}: ${{ inputs.source_ref }} @ ${{ inputs.expected_sha }} (run #${{ github.run_number }})"
 
 "on":
   workflow_dispatch:
@@ -24,9 +24,14 @@ run-name: "Stable verify: ${{ inputs.source_ref }} @ ${{ inputs.expected_sha }} 
         required: true
         type: string
       expected_sha:
-        description: 'Full 40-character commit SHA that source_ref must resolve to'
+        description: 'Full 40-character SHA (ordinary verification requires branch equality; artifact-only fetches this exact SHA)'
         required: true
         type: string
+      owned_runtime_only:
+        description: 'Artifact-only darwin/x64 core runtime; skips ordinary PR verification, not a release/merge gate'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -35,11 +40,13 @@ env:
   SOURCE_REPO: pimmink/gsd-pi
 
 concurrency:
-  group: gsd-pi-remote-pr-verification-${{ inputs.source_ref }}
-  cancel-in-progress: true
+  # Artifact runs are unique and cannot cancel ordinary verification or another artifact run.
+  group: ${{ inputs.owned_runtime_only && format('gsd-pi-owned-runtime-{0}-{1}', github.run_id, github.run_attempt) || format('gsd-pi-remote-pr-verification-{0}', inputs.source_ref) }}
+  cancel-in-progress: ${{ !inputs.owned_runtime_only }}
 
 jobs:
   pr-verify:
+    if: ${{ !inputs.owned_runtime_only }}
     name: pr-verify
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -242,3 +249,167 @@ jobs:
             ${{ runner.temp }}/lifecycle-shadow-gate.log
           if-no-files-found: ignore
           retention-days: 3
+
+  owned-runtime:
+    if: ${{ inputs.owned_runtime_only }}
+    name: owned-runtime (artifact only, not PR verification)
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      SOURCE_REF: ${{ inputs.source_ref }}
+      WORKFLOW_SHA: ${{ github.workflow_sha }}
+      WORKFLOW_REF: ${{ github.workflow_ref }}
+      WORKFLOW_REPOSITORY: ${{ github.repository }}
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+      GSD_SKIP_RTK_INSTALL: '1'
+      GSD_SKIP_DEP_REPAIR: '1'
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
+      # Empty encoded flags override native/.cargo/config.toml's target-cpu=native.
+      # Rust's x86_64-apple-darwin target baseline is portable; do not inherit host tuning.
+      CARGO_ENCODED_RUSTFLAGS: ''
+      RUSTFLAGS: ''
+    steps:
+      - name: Validate pins, observe branch head, checkout exact source and workflow helpers
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ && "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$WORKFLOW_REPOSITORY" == pimmink/gsd-pi-ci ]]
+          [[ -n "$SOURCE_REF" && "$SOURCE_REF" != -* && "$SOURCE_REF" != refs/* ]]
+          git check-ref-format --branch "$SOURCE_REF" >/dev/null
+          observed="$(git ls-remote https://github.com/pimmink/gsd-pi.git "refs/heads/${SOURCE_REF}")"
+          [[ "$(printf '%s\n' "$observed" | grep -c .)" == 1 ]]
+          observed_sha="$(printf '%s\n' "$observed" | cut -f1)"
+          [[ "$observed_sha" =~ ^[0-9a-f]{40}$ ]]
+          {
+            echo "OBSERVED_BRANCH_HEAD=$observed_sha"
+            echo "OBSERVED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "BUILD_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_ENV"
+          # No credentials, branch equality, or workflow-SHA/source-SHA aliasing here.
+          git init source
+          git -C source remote add origin https://github.com/pimmink/gsd-pi.git
+          git -C source fetch --no-tags --depth=1 origin "$EXPECTED_SHA"
+          git -C source checkout --detach FETCH_HEAD
+          [[ "$(git -C source rev-parse HEAD)" == "$EXPECTED_SHA" ]]
+          [[ "$(git -C source rev-parse --abbrev-ref HEAD)" == HEAD ]]
+          git init ci-helpers
+          git -C ci-helpers remote add origin https://github.com/pimmink/gsd-pi-ci.git
+          git -C ci-helpers fetch --no-tags --depth=1 origin "$WORKFLOW_SHA"
+          git -C ci-helpers checkout --detach FETCH_HEAD
+          [[ "$(git -C ci-helpers rev-parse HEAD)" == "$WORKFLOW_SHA" ]]
+
+      - name: Setup pnpm (existing pin)
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 10.12.1
+          package_json_file: source/package.json
+          run_install: false
+
+      - name: Setup Node (existing action pin, explicit runtime version)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.15.0'
+
+      - name: Assert native host and run offline helper/security tests
+        run: |
+          node -e "if (process.platform !== 'darwin' || process.arch !== 'x64') throw Error('requires darwin/x64')"
+          python3 -m unittest discover -s ../ci-helpers/scripts/tests -v
+
+      - name: Frozen dependencies and core build only (online runner)
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build:core
+
+      - name: Setup Rust (existing pin; resolved stable version recorded)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-apple-darwin
+
+      - name: Build source-native portable release addon
+        working-directory: source/native/crates/engine
+        run: |
+          cargo build --release --locked --target x86_64-apple-darwin
+          mkdir -p ../../addon
+          cp ../../target/x86_64-apple-darwin/release/libgsd_engine.dylib ../../addon/gsd_engine.darwin-x64.node
+          file ../../addon/gsd_engine.darwin-x64.node
+          # Resolve loader dependencies against system libraries, not runner-only dylibs.
+          otool -L ../../addon/gsd_engine.darwin-x64.node > "$RUNNER_TEMP/owned-native-libraries.txt"
+          otool -D ../../addon/gsd_engine.darwin-x64.node > "$RUNNER_TEMP/owned-native-id.txt"
+
+      - name: Record build context and package bounded full dependency closure
+        run: |
+          [[ "$(git -C ../ci-helpers rev-parse HEAD)" == "$WORKFLOW_SHA" ]]
+          git -C ../ci-helpers diff --quiet HEAD --
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          def version(*args):
+              return subprocess.check_output(args, text=True, timeout=30).strip()
+          context = {
+              'expected_sha': os.environ['EXPECTED_SHA'], 'source_ref': os.environ['SOURCE_REF'],
+              'observed_branch_head': os.environ['OBSERVED_BRANCH_HEAD'], 'observed_at': os.environ['OBSERVED_AT'],
+              'workflow_sha': os.environ['WORKFLOW_SHA'], 'workflow_ref': os.environ['WORKFLOW_REF'],
+              'run_id': os.environ['GITHUB_RUN_ID'], 'attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'build': {'started_at': os.environ['BUILD_STARTED_AT'], 'node': version('node', '--version'),
+                        'pnpm': version('pnpm', '--version'), 'rust': version('rustc', '-Vv'),
+                        'cargo': version('cargo', '--version'), 'python': version('python3', '--version'),
+                        'os': version('sw_vers'), 'kernel_arch': version('uname', '-m'),
+                        'runner_image': os.environ.get('ImageOS'), 'runner_image_version': os.environ.get('ImageVersion'),
+                        'deployment_target': os.environ['MACOSX_DEPLOYMENT_TARGET'],
+                        'cargo_encoded_rustflags': os.environ['CARGO_ENCODED_RUSTFLAGS'], 'rustflags': os.environ['RUSTFLAGS'],
+                        'target': 'x86_64-apple-darwin', 'profile': 'release --locked',
+                        'native_libraries': Path(os.environ['RUNNER_TEMP'], 'owned-native-libraries.txt').read_text(),
+                        'native_library_id': Path(os.environ['RUNNER_TEMP'], 'owned-native-id.txt').read_text()}}
+          Path(os.environ['RUNNER_TEMP'], 'owned-context.json').write_text(json.dumps(context))
+          PY
+          python3 ../ci-helpers/scripts/package-owned-runtime.py --source "$PWD" \
+            --output "$RUNNER_TEMP/owned-bundle" --context "$RUNNER_TEMP/owned-context.json"
+
+      - name: Verify, safely unpack and prove source-native/internal imports (no CLI host)
+        run: |
+          python3 ../ci-helpers/scripts/verify-owned-runtime.py --bundle "$RUNNER_TEMP/owned-bundle" \
+            --expected-sha "$EXPECTED_SHA" --workflow-sha "$WORKFLOW_SHA" \
+            --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" \
+            --destination "$RUNNER_TEMP/owned-verified" --probe-node "$(command -v node)" \
+            > "$RUNNER_TEMP/owned-bundle/verification.json"
+
+      - name: Upload owned core runtime (not a release)
+        id: artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0 (existing pin)
+        with:
+          name: owned-runtime-${{ inputs.expected_sha }}-darwin-x64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/owned-bundle/runtime.tar.gz
+            ${{ runner.temp }}/owned-bundle/SHA256SUMS
+            ${{ runner.temp }}/owned-bundle/file-manifest.json
+            ${{ runner.temp }}/owned-bundle/provenance.json
+            ${{ runner.temp }}/owned-bundle/verification.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Summarize separate source/workflow pins and artifact identities
+        env:
+          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.artifact.outputs.artifact-digest }}
+        run: |
+          {
+            echo '### Owned core runtime (artifact-only, not PR/merge/release acceptance)'
+            echo "Source: pimmink/gsd-pi @ $EXPECTED_SHA"
+            echo "Observed branch: $SOURCE_REF @ $OBSERVED_BRANCH_HEAD ($OBSERVED_AT)"
+            echo "Workflow/helpers: $WORKFLOW_REF @ $WORKFLOW_SHA"
+            echo "Run/attempt: $GITHUB_RUN_ID / $GITHUB_RUN_ATTEMPT"
+            echo "Actions artifact ID: $ARTIFACT_ID; outer digest: $ARTIFACT_DIGEST"
+            echo 'Inner payload checksums:'
+            echo '```text'
+            sed -n '1,3p' "$RUNNER_TEMP/owned-bundle/SHA256SUMS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
