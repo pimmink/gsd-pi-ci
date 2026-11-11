@@ -269,8 +269,8 @@ class RuntimeTests(unittest.TestCase):
         # export (dist/esm/index.js), which SDK 1.32.0 does not ship; the runtime only
         # imports /client and /server subpaths.
         probe = (SCRIPTS / "probe-owned-runtime.mjs").read_text()
-        self.assertNotIn("@modelcontextprotocol/sdk'", probe)
-        self.assertNotIn("'@modelcontextprotocol/sdk'", probe)
+        self.assertIn("name === '@modelcontextprotocol/sdk'", probe)
+        self.assertNotIn("import.meta.resolve('@modelcontextprotocol/sdk')", probe)
 
     def test_native_external_dylib_and_nonportable_flags_rejected(self):
         self.fixture()

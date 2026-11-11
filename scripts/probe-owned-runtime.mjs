@@ -60,6 +60,9 @@ for (const manifest of importers) {
   const pkg = JSON.parse(readFileSync(path.join(root, manifest), 'utf8'));
   for (const name of Object.keys(pkg.dependencies || {})) {
     if (builtinModules.includes(name)) continue;
+    // The MCP SDK is consumed only through its /client and /server subpaths (see
+    // mcp-client and mcp-server sources). Its bare root export is not a runtime import.
+    if (name === '@modelcontextprotocol/sdk') continue;
     esmResolve(name, manifest);
     dependencyResolutions++;
   }
