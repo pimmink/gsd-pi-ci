@@ -78,6 +78,9 @@ if (!loadedAddons.some((entry) => entry.path === relative(expectedAddon) && entr
 if (loadedAddons.some((entry) => entry.path.includes('@opengsd/engine-'))) fail('published native fallback refused');
 // Import real public SDK entries without invoking CLI/MCP hosts. Guard every transitive resolution.
 const importedSdkEntries = [];
+// Probe the public subpaths the runtime actually imports. The MCP SDK root export
+// '.' points at dist/esm/index.js, which SDK 1.32.0 does not ship; the runtime never
+// imports that root, so it is not a runtime requirement.
 for (const name of ['@gsd/pi-agent-core', '@opengsd/contracts', '@opengsd/rpc-client']) {
   const entry = esmResolve(name);
   await import(pathToFileURL(entry).href);

@@ -245,6 +245,33 @@ class RuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source link escapes"):
             self.package()
 
+    def test_pnpm_peer_suffixed_store_sdk_entry_is_staged_and_resolvable(self):
+        # Regression for CI run 43046680198: pnpm peer-suffixed store paths
+        # (.pnpm/@modelcontextprotocol+sdk@1.32.0_zod@4.4.3/...) must be packaged with
+        # the link that the runtime probe resolves, or ESM entry lookup dangles.
+        self.fixture()
+        store = "node_modules/.pnpm/@modelcontextprotocol+sdk@1.32.0_zod@4.4.3/node_modules/@modelcontextprotocol/sdk"
+        self.put(store + "/dist/esm/index.js", "export const ok = true;\n")
+        self.put(store + "/package.json", json.dumps({"name": "@modelcontextprotocol/sdk", "version": "1.32.0"}))
+        self.put("node_modules/@modelcontextprotocol/sdk",
+                 symlink="../.pnpm/@modelcontextprotocol+sdk@1.32.0_zod@4.4.3/node_modules/@modelcontextprotocol/sdk")
+        self.package()
+        by_path = {e["path"]: e for e in json.loads((self.bundle / "file-manifest.json").read_text())["entries"]}
+        entry = by_path.get("runtime/" + store + "/dist/esm/index.js")
+        self.assertIsNotNone(entry, "peer-suffixed store entrypoint must be packaged")
+        self.assertEqual(entry["type"], "file")
+        link = by_path.get("runtime/node_modules/@modelcontextprotocol/sdk")
+        self.assertIsNotNone(link, "consumer symlink must be packaged")
+        self.assertEqual(link["type"], "symlink")
+
+    def test_probe_does_not_require_mcp_sdk_root_entry(self):
+        # Regression for CI run 43046680198: the probe must not import the MCP SDK root
+        # export (dist/esm/index.js), which SDK 1.32.0 does not ship; the runtime only
+        # imports /client and /server subpaths.
+        probe = (SCRIPTS / "probe-owned-runtime.mjs").read_text()
+        self.assertNotIn("@modelcontextprotocol/sdk'", probe)
+        self.assertNotIn("'@modelcontextprotocol/sdk'", probe)
+
     def test_native_external_dylib_and_nonportable_flags_rejected(self):
         self.fixture()
         for change in ({"native_libraries": "addon:\n\t/usr/local/opt/runner/libbad.dylib\n"},
