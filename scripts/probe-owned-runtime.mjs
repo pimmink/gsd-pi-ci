@@ -1,6 +1,6 @@
 // Executed only by an explicit --probe-node. No CLI host, session, network or installation.
 import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { builtinModules, createRequire, registerHooks } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -63,6 +63,13 @@ for (const manifest of importers) {
     // The MCP SDK is consumed only through its /client and /server subpaths (see
     // mcp-client and mcp-server sources). Its bare root export is not a runtime import.
     if (name === '@modelcontextprotocol/sdk') continue;
+    // Binary-only daemons (no main/exports, e.g. @opengsd/gsd-browser) are launched as
+    // executables by the runtime, never imported as ESM libraries; probe them as such.
+    const depDir = path.join(root, 'node_modules', name);
+    if (existsSync(depDir) && statSync(depDir).isDirectory()) {
+      const depPkg = JSON.parse(readFileSync(path.join(depDir, 'package.json'), 'utf8'));
+      if (!depPkg.main && !depPkg.exports && depPkg.bin) continue;
+    }
     esmResolve(name, manifest);
     dependencyResolutions++;
   }
