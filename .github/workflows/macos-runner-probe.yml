@@ -1,7 +1,7 @@
 # Minimal macOS runner probe for pimmink/gsd-pi native-attended (W067 / #3162).
 # Manual dispatch only. Binds the requested source to an exact SHA, then records
 # runner provenance. It runs no test code.
-name: macOS runner probe (gsd-pi)
+name: macOS native-attended run (gsd-pi)
 
 run-name: "macOS probe: ${{ inputs.source_ref }} @ ${{ inputs.expected_sha }}"
 
@@ -25,9 +25,9 @@ env:
 
 jobs:
   probe:
-    name: probe (macos-15)
+    name: native-attended (macos-15, arm64)
     runs-on: macos-15
-    timeout-minutes: 10
+    timeout-minutes: 45
     steps:
       - name: Validate inputs
         shell: bash
@@ -64,3 +64,62 @@ jobs:
           echo "image.os=${ImageOS:-unset} image.version=${ImageVersion:-unset}"
           echo "node: $(node --version 2>/dev/null || echo missing)"
           echo "pnpm: $(pnpm --version 2>/dev/null || echo missing)"
+
+      - name: Check out tested source (exact SHA)
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          rm -rf src-under-test
+          git init -q src-under-test
+          cd src-under-test
+          git remote add origin "https://github.com/${SOURCE_REPO}.git"
+          git -c protocol.version=2 fetch -q --depth 1 origin "$EXPECTED_SHA"
+          git checkout -q --detach FETCH_HEAD
+          actual="$(git rev-parse HEAD)"
+          if [ "$actual" != "$EXPECTED_SHA" ]; then
+            echo "::error::checkout HEAD $actual != expected $EXPECTED_SHA"
+            exit 1
+          fi
+          echo "checkout HEAD verified: $actual"
+
+      - name: Install pnpm and Node
+        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 10.12.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        working-directory: src-under-test
+        run: pnpm install --frozen-lockfile
+
+      - name: Build native fixture package
+        id: fixture
+        working-directory: src-under-test
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixture_package="$(node scripts/build-native-fixture-package.mjs)"
+          if [ ! -d "$fixture_package" ]; then
+            echo "::error::fixture package not created: $fixture_package"
+            exit 1
+          fi
+          echo "W067_NATIVE_FIXTURE_PACKAGE=$fixture_package" >> "$GITHUB_ENV"
+
+      - name: Run native attended fixtures
+        working-directory: src-under-test
+        shell: bash
+        run: |
+          set -uo pipefail
+          rc=0
+          # `|| rc=$?` keeps the inherited -e from exiting before the log tail and
+          # the explicit failure below. The real exit code is preserved.
+          node --import tsx --test --test-concurrency=1 src/tests/coordination-maintenance-attended.test.ts > native-attended.tap.log 2>&1 || rc=$?
+          tail -25 native-attended.tap.log
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::native attended fixtures failed (exit $rc)"
+            exit "$rc"
+          fi
