@@ -96,6 +96,16 @@ jobs:
         working-directory: src-under-test
         run: pnpm install --frozen-lockfile
 
+      - name: Build native package (dependency-first, before tests)
+        working-directory: src-under-test
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The attended tests import @gsd/native from dist/. Build it explicitly
+          # in the tested checkout; an unbuilt checkout fails with ERR_MODULE_NOT_FOUND.
+          pnpm run build:native-pkg
+          test -f packages/native/dist/directory-sync/index.js
+
       - name: Build native fixture package
         id: fixture
         working-directory: src-under-test
