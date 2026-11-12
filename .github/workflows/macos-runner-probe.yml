@@ -1,0 +1,66 @@
+# Minimal macOS runner probe for pimmink/gsd-pi native-attended (W067 / #3162).
+# Manual dispatch only. Binds the requested source to an exact SHA, then records
+# runner provenance. It runs no test code.
+name: macOS runner probe (gsd-pi)
+
+run-name: "macOS probe: ${{ inputs.source_ref }} @ ${{ inputs.expected_sha }}"
+
+"on":
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: 'Branch in pimmink/gsd-pi (e.g. fix/w067-native-harness-ci-3161)'
+        required: true
+        type: string
+      expected_sha:
+        description: 'Full 40-character commit SHA that source_ref must resolve to'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_REPO: pimmink/gsd-pi
+
+jobs:
+  probe:
+    name: probe (macos-15)
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Validate inputs
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::expected_sha is not a full 40-char lowercase SHA"
+            exit 1
+          fi
+
+      - name: Verify source_ref resolves to expected_sha
+        shell: bash
+        env:
+          SOURCE_REF: ${{ inputs.source_ref }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git ls-remote "https://github.com/${SOURCE_REPO}.git" "refs/heads/${SOURCE_REF}" | cut -f1)"
+          if [ "$actual" != "$EXPECTED_SHA" ]; then
+            echo "::error::$SOURCE_REF resolves to '$actual', expected '$EXPECTED_SHA'"
+            exit 1
+          fi
+          echo "source_ref binding verified: $SOURCE_REF -> $actual"
+
+      - name: Record runner provenance
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo "sw_vers:"; sw_vers || true
+          echo "uname -m: $(uname -m)"
+          echo "runner.os=$RUNNER_OS runner.arch=$RUNNER_ARCH"
+          echo "image.os=${ImageOS:-unset} image.version=${ImageVersion:-unset}"
+          echo "node: $(node --version 2>/dev/null || echo missing)"
+          echo "pnpm: $(pnpm --version 2>/dev/null || echo missing)"
