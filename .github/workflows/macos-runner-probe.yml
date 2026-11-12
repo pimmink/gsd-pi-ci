@@ -139,8 +139,17 @@ jobs:
           # `|| rc=$?` keeps the inherited -e from exiting before the log tail and
           # the explicit failure below. The real exit code is preserved.
           node --import tsx --test --test-concurrency=1 src/tests/coordination-maintenance-attended.test.ts > native-attended.tap.log 2>&1 || rc=$?
-          tail -25 native-attended.tap.log
+          # Keep the full TAP log as an artifact; print only the summary, not a tail.
+          grep -E '^# (tests|pass|fail|cancelled|skipped|todo)' native-attended.tap.log || true
           if [ "$rc" -ne 0 ]; then
             echo "::error::native attended fixtures failed (exit $rc)"
             exit "$rc"
           fi
+
+      - name: Upload full TAP log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-attended-tap-${{ inputs.expected_sha }}
+          path: src-under-test/native-attended.tap.log
+          if-no-files-found: warn
