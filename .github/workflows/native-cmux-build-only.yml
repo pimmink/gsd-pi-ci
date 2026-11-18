@@ -1,0 +1,176 @@
+# D019 stock tagged materialization; CI apps/helpers may start. Separate admission required.
+# One future fresh-runner build only. Not GSD verification or native acceptance.
+name: cmux native artifact (D014-D015)
+run-name: "cmux build-only | 33daf63d0152d5c7f26155506f0beb191e5ad3da | ${{ inputs.exclusive_tag }}"
+
+"on":
+  workflow_dispatch:
+    inputs:
+      expected_workflow_sha:
+        description: 'Full reviewed CI commit SHA (NOT the cmux source SHA)'
+        type: string
+        required: true
+      exclusive_tag:
+        description: 'New exclusive d014- lowercase slug; never reuse a local/shared tag'
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  BUILD_TAG: ${{ inputs.exclusive_tag }}
+  EXPECTED_WORKFLOW_SHA: ${{ inputs.expected_workflow_sha }}
+
+jobs:
+  queue-guard:
+    if: github.repository == 'pimmink/gsd-pi-ci' && github.event.repository.private == false && github.run_attempt == '1'
+    name: exact-run read-only observer (not native start or cancellation authority)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Observe only this new run (mandatory external parent guard owns cancellation)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Fetch timestamp from THIS run; the guard then independently revalidates it.
+          created_at="$(gh api "repos/pimmink/gsd-pi-ci/actions/runs/$GITHUB_RUN_ID" --jq .created_at)"
+          python3 scripts/native_cmux_queue.py \
+            --run-id "$GITHUB_RUN_ID" --workflow-sha "$EXPECTED_WORKFLOW_SHA" \
+            --created-at "$created_at" --tag "$BUILD_TAG" --output queue-evidence --observe-only
+      - name: Preserve read-only diagnosis (parent cancellation may interrupt upload)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: d014-queue-${{ github.run_id }}
+          path: queue-evidence/*.json
+          retention-days: 1
+          if-no-files-found: warn
+
+  native-build:
+    if: github.repository == 'pimmink/gsd-pi-ci' && github.event.repository.private == false && github.run_attempt == '1'
+    name: native-build (macos-26-intel, x86_64)
+    runs-on: macos-26-intel
+    timeout-minutes: 55 # Execution only; queue bound requires the sole external parent guard.
+    concurrency:
+      group: native-cmux-build-only-d014
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: harness
+          persist-credentials: false
+      - name: Verify the public source branch still names the fixed source
+        run: |
+          set -euo pipefail
+          actual="$(git -c credential.helper= ls-remote https://github.com/pimmink/cmux.git refs/heads/fix/gsdpi-vault-resume-cas-20261110 | awk '{print $1}')"
+          test "$actual" = 33daf63d0152d5c7f26155506f0beb191e5ad3da
+          test "$GITHUB_SHA" = "$EXPECTED_WORKFLOW_SHA"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: pimmink/cmux
+          ref: 33daf63d0152d5c7f26155506f0beb191e5ad3da
+          path: source
+          submodules: recursive
+          persist-credentials: false
+      - name: Verify fresh isolated runner, source proofs and absent tag paths before setup
+        id: prepare
+        env:
+          GIT_NO_LAZY_FETCH: '1'
+        run: python3 harness/scripts/native_cmux.py prepare --source source --tag "$BUILD_TAG" --output evidence
+      - name: Minimal pinned per-run Zig and Bun; official Metal component only if needed
+        id: tools
+        env:
+          GIT_NO_LAZY_FETCH: '1'
+        run: python3 harness/scripts/native_cmux.py tools --source source --tag "$BUILD_TAG" --output evidence
+      - name: Fail-closed actual toolchain, clean source and target-host preflight
+        id: preflight
+        run: |
+          set -euo pipefail
+          python3 harness/scripts/native_cmux.py preflight --source source --tag "$BUILD_TAG" --output evidence
+          test ! -e "$DERIVED_DATA" && test ! -L "$DERIVED_DATA"
+      - name: ONE stock tagged materialization; stock app and helper startup permitted by D019
+        id: build
+        working-directory: source
+        run: |
+          set -euo pipefail
+          # Stock source owns its /tmp log (not size-bounded here). Capture the
+          # stdout/stderr pipe without forwarding an unbounded failure dump to Actions.
+          CMUX_DEV_BACKEND_MODE=local ./scripts/reload.sh --tag "$BUILD_TAG" --no-global-cli-links --derived-data "$DERIVED_DATA" 2>&1 | \
+            python3 ../harness/scripts/native_cmux.py capture --output ../evidence
+          git diff --exit-code HEAD --
+          git submodule foreach --recursive 'git diff --exit-code HEAD --'
+      - name: Capture the actual final tagged app and unchanged source identity
+        id: materialized
+        env:
+          GIT_NO_LAZY_FETCH: '1'
+        run: python3 harness/scripts/native_cmux.py materialized --source source --tag "$BUILD_TAG" --output evidence
+      - name: Collect locked provider distributions from stock build caches (no download)
+        id: providers
+        env:
+          GIT_NO_LAZY_FETCH: '1'
+        run: |
+          set -euo pipefail
+          python3 harness/scripts/native_cmux_providers.py --source source --derived-data "$DERIVED_DATA" --output evidence/providers.json
+      - name: Inspect every embedded Mach-O, including required helpers
+        id: inspect
+        run: |
+          set -euo pipefail
+          python3 harness/scripts/native_cmux.py inspect --app "$NATIVE_APP_PATH" --providers evidence/providers.json --output evidence
+      - name: Package only the inspected compatible artifact (400 MiB upload cap)
+        id: package
+        run: |
+          set -euo pipefail
+          python3 harness/scripts/native_cmux.py package --app "$NATIVE_APP_PATH" --output evidence
+      - name: Record actual step outcomes, even on preflight/build failure
+        if: always()
+        env:
+          PREPARE_OUTCOME: ${{ steps.prepare.outcome }}
+          TOOLS_OUTCOME: ${{ steps.tools.outcome }}
+          MATERIALIZED_OUTCOME: ${{ steps.materialized.outcome }}
+          PREFLIGHT_OUTCOME: ${{ steps.preflight.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          PROVIDERS_OUTCOME: ${{ steps.providers.outcome }}
+          INSPECT_OUTCOME: ${{ steps.inspect.outcome }}
+          PACKAGE_OUTCOME: ${{ steps.package.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          out = Path('evidence')
+          out.mkdir(exist_ok=True)
+          result = {k: os.environ.get(k) for k in (
+              'GITHUB_SHA', 'GITHUB_WORKFLOW_REF', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT',
+              'BUILD_TAG', 'PREPARE_OUTCOME', 'TOOLS_OUTCOME', 'MATERIALIZED_OUTCOME',
+              'PREFLIGHT_OUTCOME', 'BUILD_OUTCOME', 'PROVIDERS_OUTCOME', 'INSPECT_OUTCOME', 'PACKAGE_OUTCOME')}
+          result['expected_source_sha'] = '33daf63d0152d5c7f26155506f0beb191e5ad3da'
+          result['scope'] = 'build/artifact validation only; NOT native acceptance'
+          (out / 'results.json').write_text(json.dumps(result, indent=2) + '\n')
+          PY
+      - name: Retain bounded actual native log/stdout and enforce final artifact ceiling
+        id: diagnostics
+        if: always()
+        run: |
+          python3 harness/scripts/native_cmux.py diagnostics --tag "$BUILD_TAG" --output evidence
+      - name: Upload bounded build evidence/artifact, never a release
+        if: always() && steps.diagnostics.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: d014-cmux-build-only-${{ github.run_id }}
+          path: evidence/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: warn
