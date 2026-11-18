@@ -151,6 +151,49 @@ passing sharded run as a substitute for real upstream PR/merge CI.
   attacker-controlled repo input, by design — this is a security boundary, not an
   oversight.
 
+## Dedicated native cmux artifact route (D014 / D015)
+
+The manual-only [`native-cmux-build-only.yml`](../.github/workflows/native-cmux-build-only.yml)
+workflow is a separate, fixed-source D014/D015 artifact route, **not** a GSD full/sharded
+verification mode and not native acceptance. Read
+[`native-cmux-build-only.md`](native-cmux-build-only.md) before considering it.
+That guide defines the pinned cmux source, explicit standard Intel runner, one-build
+limit, prerequisite/compatibility checks, mandatory **sole external parent guard**
+for the exact new run, and minute-14 diagnosis to leave queued state before minute 15.
+The internal Linux observer is read-only (`--observe-only`, `actions: read`); it never
+cancels, and its start is not native-job start. The parent must preflight ownership,
+monitor the guard heartbeat and reconcile unknown cancellation/network races without
+retry/redispatch. This is a strict queue condition, not an outage-proof guarantee.
+The linked guide also defines full-inventory/private-copy/actual-ZIP verification,
+bounded actual native-log/stdout capture on success/failure, one-day artifact retention
+(not Actions console-log retention), final upload ceilings and pending prerequisite,
+artifact-storage and **original remaining EUR 10 / balance unknown** budget gates.
+
+> [!WARNING]
+> **Independent exact-code review and separate admission still required.** Actual
+> D019 permits stock app/helper startup on the fresh temporary CI runner, and later
+> a separate Intel macOS 15.7.9 testapp only after safe admission. Active cmux/sessions
+> remain untouched. No lifecycle patch solely to avoid startup is needed. The old mode deletes its complete staging app;
+> the base product is not a valid substitute. The new recipe retains source proof
+> hashes and verifies the actual final tagged app before inventory/ZIP validation.
+> Normal stock mode can stop matching tags and publish state, so absent native
+> app/process/socket state and a new exclusive tag are mandatory. Static inspection
+> covers required Intel host roots, plugin/system-extension types, dyld contexts and
+> per-x86_64 minimum OS, but SDK26 stubs cannot establish host15 API/symbol/runtime
+> compatibility. Safe absent weak loads remain explicitly unproven, not mandatory
+> strong loads. Exact remote-SSH payload DATA classification never exempts a host
+> dependency. Provider distribution/nested-product completeness and provenance also
+> remain evidence obligations. Offline green is never review or dispatch admission.
+> Minimal CI-only per-run pinned Zig/Bun setup and one official selected-Xcode
+> Metal component download if needed are prepared, not executed or proven ready.
+> See the dedicated guide for source/version/provenance, failure and retry bounds.
+> This does not reset the original remaining EUR 10, one-run/build limit or queue
+> clock, and does not establish zero total cost, Intel capacity or native acceptance.
+
+Do not use `remote-verify.sh` to dispatch/resume it, infer a native start from an
+auxiliary job, rerun it to test CI code, or substitute another runner label.
+The existing GSD workflows and helper retain their current semantics.
+
 ## Which tier an agent should use, and when
 
 1. While actively iterating on a change: local targeted loop
