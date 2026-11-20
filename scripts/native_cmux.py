@@ -512,8 +512,19 @@ def copy_inspected_bundle(app, staged, expected):
         os.close(root_fd)
 
 
-@fenced
 def package_app(app, output, report):
+    # Only attempt-private paths are eligible for cleanup. Never check/unlink a
+    # public pathname: even an inode match cannot make that operation atomic.
+    with tempfile.TemporaryDirectory(prefix="cmux-package-", dir=output) as temp:
+        archive = Path(temp) / "cmux-build-only.zip"
+        _package_app(app, output, report, archive)
+        # All fence exit validation has passed. Publish without overwriting;
+        # nothing after this point destructively cleans a public pathname.
+        os.link(archive, output / archive.name, follow_symlinks=False)
+
+
+@fenced
+def _package_app(app, output, report, archive):
     inspection = json.loads((output / "inspect.json").read_text())
     require(inspection.get("ok") is True and inspection.get("inventory_schema") == 1,
             "No passing full-inventory compatibility inspection; refusing app upload")
@@ -524,36 +535,30 @@ def package_app(app, output, report):
     require(provider.verify(app, reference) == inspection["provider_proof"],
             "Provider/source inputs changed since inspection")
     require(bundle_snapshot(app) == expected, "Bundle identity/inventory changed since inspection")
-    archive = output / "cmux-build-only.zip"
-    require(not archive.exists(), "Archive already exists; no overwrite")
+    require(not os.path.lexists(output / archive.name), "Archive already exists; no overwrite")
     # The archive producer never reads the mutable original. Check the private copy and
     # actual archive against the frozen inspection, then recheck both trees. No claims
     # about immutable OS flags or protection from an already-compromised runner.
-    try:
-        with tempfile.TemporaryDirectory(prefix="cmux-inspected-") as temp:
-            staged = Path(temp) / app.name
-            copy_inspected_bundle(app, staged, expected)
-            require(bundle_snapshot(staged)["inventory"] == expected["inventory"], "Private copy differs from inspection")
-            require(provider.verify(staged, reference) == inspection["provider_proof"],
-                    "Private copy provider contract differs from inspection")
-            require(bundle_snapshot(app) == expected, "Bundle changed during copy")
-            # Resource forks/xattrs are not in this portable inventory; do not smuggle
-            # uninspected __MACOSX/AppleDouble entries into an otherwise verified ZIP.
-            run("ditto", "-c", "-k", "--norsrc", "--keepParent", str(staged), str(archive))
-            require(archive.stat().st_size <= MAX_UPLOAD, "Archive exceeds upload cap")
-            verify_archive(archive, app.name, expected["inventory"])
-            require(bundle_snapshot(staged)["inventory"] == expected["inventory"], "Private copy changed during archive")
-            require(bundle_snapshot(app) == expected, "Bundle changed during archive")
-            require(provider.verify(app, reference) == inspection["provider_proof"],
-                    "Provider/source inputs changed during packaging")
-            require(sum(p.stat().st_size for p in output.iterdir() if p.is_file()) + 64 * 1024 <= MAX_UPLOAD,
-                    "Artifact exceeds total upload cap")
-        report.update(archive=archive.name, bytes=archive.stat().st_size, sha256=sha256(archive),
-                      archive_verified=True, inventory_schema=1, archive_metadata="portable files/modes/symlinks; no resource forks/xattrs")
-    except Exception:
-        if archive.exists():
-            archive.unlink()  # Only this invocation's new partial/unverified archive.
-        raise
+    with tempfile.TemporaryDirectory(prefix="cmux-inspected-", dir=output) as temp:
+        staged = Path(temp) / app.name
+        copy_inspected_bundle(app, staged, expected)
+        require(bundle_snapshot(staged)["inventory"] == expected["inventory"], "Private copy differs from inspection")
+        require(provider.verify(staged, reference) == inspection["provider_proof"],
+                "Private copy provider contract differs from inspection")
+        require(bundle_snapshot(app) == expected, "Bundle changed during copy")
+        # Resource forks/xattrs are not in this portable inventory; do not smuggle
+        # uninspected __MACOSX/AppleDouble entries into an otherwise verified ZIP.
+        run("ditto", "-c", "-k", "--norsrc", "--keepParent", str(staged), str(archive))
+        require(archive.stat().st_size <= MAX_UPLOAD, "Archive exceeds upload cap")
+        verify_archive(archive, app.name, expected["inventory"])
+        require(bundle_snapshot(staged)["inventory"] == expected["inventory"], "Private copy changed during archive")
+        require(bundle_snapshot(app) == expected, "Bundle changed during archive")
+        require(provider.verify(app, reference) == inspection["provider_proof"],
+                "Provider/source inputs changed during packaging")
+        require(archive.stat().st_size + sum(p.stat().st_size for p in output.iterdir() if p.is_file())
+                + 64 * 1024 <= MAX_UPLOAD, "Artifact exceeds total upload cap")
+    report.update(archive=archive.name, bytes=archive.stat().st_size, sha256=sha256(archive),
+                  archive_verified=True, inventory_schema=1, archive_metadata="portable files/modes/symlinks; no resource forks/xattrs")
 
 
 def bundle_paths(app):
@@ -817,8 +822,8 @@ def _source_contract(source, output, report, inventory):
         path = source / relative
         require(not path.is_symlink() and path.is_file() and sha256(path) == expected,
                 f"Pinned source proof mismatch: {relative}")
-        # Flat proof files preserve the existing final-evidence no-directories/
-        # total-upload-cap contract (and avoid hidden-file upload exclusions).
+        # Flat proof names survive explicit diagnostic staging/size accounting
+        # and avoid hidden-file upload exclusions.
         dest = output / ("source-proof--" + relative.replace("/", "--"))
         if os.path.lexists(dest):
             require(not dest.is_symlink() and dest.is_file() and sha256(dest) == expected, "Source proof changed")
@@ -1131,30 +1136,151 @@ def collect_build_logs(output, tag, temp_root=Path("/tmp")):
     (output / "build-logs.json").write_text(json.dumps(meta, indent=2) + "\n")
 
 
-def finalize_evidence(output):
-    files = sorted(output.iterdir())
+DIAGNOSTIC_FILES = (
+    "prepare.json", "tools.json", "materialized.json", "preflight.json", "inspect.json",
+    "package.json", "capture.json", "results.json", "providers.json", "stdout-capture.json",
+    "providers-collection.json", "zig-setup.log",
+    "build-logs.json", "build-stdout.log", "native-build.log",
+    # Fixed pinned catalog, never a source-proof glob or arbitrary evidence tree.
+    *("source-proof--" + relative.replace("/", "--") for relative in SOURCE_FILES),
+)
+
+
+def _stage_evidence_file(source, stage, name, limit, expected=None):
+    """Copy bounded regular bytes to an exclusively created, attempt-private file."""
+    destination = stage / name
+    created = False
     try:
-        require(all(p.is_file() and not p.is_symlink() for p in files), "Unexpected evidence entry")
-        require(all(p.stat().st_size <= 8 * 1024**2 for p in files if p.suffix == ".json"), "Diagnostic JSON exceeds 8 MiB cap")
-        # Reserve for this manifest and the diagnostics mode's final JSON report.
-        require(sum(p.stat().st_size for p in files) + 64 * 1024 <= MAX_UPLOAD,
-                "Final evidence exceeds total upload cap")
-        manifest = {**log_provenance(), "files": [
-            {"path": p.name, "bytes": p.stat().st_size, "sha256": sha256(p)} for p in files],
-            "excludes": ["artifact-files.json", "diagnostics.json"]}
-        content = json.dumps(manifest, indent=2) + "\n"
-        require(len(content.encode()) <= 32 * 1024, "Final manifest exceeds reserve")
-        (output / "artifact-files.json").write_text(content)
-    except ValueError:
-        archive = output / "cmux-build-only.zip"
-        if archive.is_file() and not archive.is_symlink():
-            archive.unlink()  # This dedicated run's artifact only, not source/native state.
+        fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1,
+                    "Evidence input is not a single-link regular file")
+            require(before.st_size <= limit, "Evidence input exceeds cap")
+            digest, size = hashlib.sha256(), 0
+            with destination.open("xb") as retained:
+                created = True
+                for chunk in iter(lambda: stream.read(64 * 1024), b""):
+                    size += len(chunk)
+                    require(size <= limit, "Evidence input exceeds cap")
+                    digest.update(chunk)
+                    retained.write(chunk)
+            after = os.fstat(stream.fileno())
+        fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        require(all(getattr(before, k) == getattr(after, k) for k in fields) and size == before.st_size,
+                "Evidence input changed during retention")
+        row = {"path": name, "bytes": size, "sha256": digest.hexdigest()}
+        if expected is not None:
+            require(row["bytes"] == expected["bytes"] and row["sha256"] == expected["sha256"],
+                    "Archive does not match the successful package proof")
+        return row
+    except Exception:
+        if created:
+            destination.unlink()  # Only this attempt-private destination; never the public input.
         raise
+
+
+def _discard_private_app_stage(stage):
+    stage.chmod(0o700)
+    shutil.rmtree(stage)
+
+
+def _validate_sealed_archive(archive, expected):
+    """Independently hash the retained file, not just the input copy stream."""
+    fd = os.open(archive, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as stream:
+        os.fchmod(stream.fileno(), 0o400)
+        before = os.fstat(stream.fileno())
+        require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
+                and not (before.st_mode & 0o222), "App staging is not sealed regular bytes")
+        digest, size = hashlib.sha256(), 0
+        for chunk in iter(lambda: stream.read(64 * 1024), b""):
+            size += len(chunk)
+            require(size <= expected["bytes"], "Sealed archive exceeds package proof")
+            digest.update(chunk)
+        after = os.fstat(stream.fileno())
+        fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        require(all(getattr(before, k) == getattr(after, k) for k in fields)
+                and os.path.samestat(archive.lstat(), after)
+                and size == expected["bytes"] and digest.hexdigest() == expected["sha256"],
+                "Sealed staging differs from the verified package bytes")
+    return {"bytes": size, "sha256": digest.hexdigest()}
+
+
+def seal_app_archive(output, report):
+    require(os.environ.get("PACKAGE_OUTCOME") == "success"
+            and os.environ.get("DIAGNOSTICS_OUTCOME") == "success",
+            "App admission requires successful package and diagnostics steps")
+    stage = Path(tempfile.mkdtemp(prefix="app-seal-", dir=output))
+    try:
+        _stage_evidence_file(output / "upload/package.json", stage, "package-proof.json", 8 * 1024**2)
+        proof = json.loads((stage / "package-proof.json").read_text())
+        require(isinstance(proof, dict) and proof.get("mode") == "package"
+                and proof.get("ok") is True and proof.get("archive_verified") is True
+                and proof.get("inventory_schema") == 1
+                and proof.get("expected_source_sha") == SOURCE_SHA
+                and proof.get("archive") == "cmux-build-only.zip"
+                and type(proof.get("bytes")) is int and proof["bytes"] >= 0
+                and re.fullmatch(r"[0-9a-f]{64}", proof.get("sha256", "")) is not None,
+                "No successful verified package receipt")
+        used = 0
+        for name in (*DIAGNOSTIC_FILES, "artifact-files.json", "diagnostics.json"):
+            try:
+                observed = (output / "upload" / name).lstat()
+            except FileNotFoundError:
+                continue
+            require(stat.S_ISREG(observed.st_mode) and observed.st_nlink == 1,
+                    "Diagnostic staging is not regular bytes")
+            used += observed.st_size
+        archive = stage / "cmux-build-only.zip"
+        _stage_evidence_file(output / archive.name, stage, archive.name,
+                             MAX_UPLOAD - used - 64 * 1024, proof)
+        stage.chmod(0o500)
+        retained = _validate_sealed_archive(archive, proof)
+        path = str(archive)
+        require(not any(c in path for c in "\r\n*?[]"), "Unsafe app upload path")
+        report.update(verified_seal=True, archive_path=path, **retained)
+    except Exception:
+        report["verified_seal"] = False
+        try:
+            _discard_private_app_stage(stage)
+        except Exception:
+            report["private_cleanup_failed"] = True
+        raise  # Rejection stays a rejection even if private cleanup fails.
+
+
+def finalize_evidence(output):
+    # Exclusive private staging, not a recursive upload of the public evidence tree.
+    # A prior directory is never reused, overwritten or destructively cleaned.
+    stage = output / "upload"
+    stage.mkdir(mode=0o700)
+    files = []
+    proof_hashes = {"source-proof--" + relative.replace("/", "--"): digest
+                    for relative, digest in SOURCE_FILES.items()}
+    for name in DIAGNOSTIC_FILES:
+        try:
+            row = _stage_evidence_file(output / name, stage, name,
+                                      8 * 1024**2 if name.endswith(".json") or name in proof_hashes else LOG_LIMIT)
+        except FileNotFoundError:
+            continue
+        if name in proof_hashes:
+            require(row["sha256"] == proof_hashes[name] and sha256(stage / name) == proof_hashes[name],
+                    "Retained pinned source proof mismatch: " + name)
+        files.append(row)
+    used = sum(row["bytes"] for row in files)
+    require(used + 64 * 1024 <= MAX_UPLOAD, "Final evidence exceeds total upload cap")
+    archive_state = "never admitted by diagnostics"
+    manifest = {**log_provenance(), "files": files, "archive": archive_state,
+                "excludes": ["artifact-files.json", "diagnostics.json", "all non-allowlisted public entries"]}
+    content = json.dumps(manifest, indent=2) + "\n"
+    require(len(content.encode()) <= 32 * 1024, "Final manifest exceeds reserve")
+    (stage / "artifact-files.json").write_text(content)
+    return {"directory": "upload", "archive": archive_state}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("prepare", "tools", "materialized", "preflight", "inspect", "package", "capture", "diagnostics"))
+    parser.add_argument("mode", choices=("prepare", "tools", "materialized", "preflight", "inspect", "package", "seal", "capture", "diagnostics"))
     parser.add_argument("--source", type=Path)
     parser.add_argument("--tag")
     parser.add_argument("--app", type=Path)
@@ -1179,11 +1305,13 @@ def main():
             inspect_app(args.app, report, providers=args.providers)
         elif args.mode == "package":
             package_app(args.app, args.output, report)
+        elif args.mode == "seal":
+            seal_app_archive(args.output, report)
         elif args.mode == "capture":
             capture_build_stdout(sys.stdin.buffer, args.output)
         else:
             collect_build_logs(args.output, args.tag or os.environ.get("BUILD_TAG"))
-            finalize_evidence(args.output)
+            report["upload"] = finalize_evidence(args.output)
         report["ok"] = True
     except (ValueError, OSError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError,
             zipfile.BadZipFile, plistlib.InvalidFileException) as exc:
@@ -1194,6 +1322,16 @@ def main():
         report = {"mode": args.mode, "ok": False, "error": "Diagnostic report exceeds 8 MiB cap; no acceptance claim"}
         content = json.dumps(report, indent=2) + "\n"
     (args.output / f"{args.mode}.json").write_text(content)
+    if args.mode == "diagnostics" and report["ok"]:
+        (args.output / "upload" / "diagnostics.json").write_text(content)
+    if args.mode == "seal":
+        # Keep every diagnostic artifact path under the same flat upload root.
+        # A receipt-staging failure also blocks all positive app outputs below.
+        _stage_evidence_file(args.output / "seal.json", args.output / "upload", "seal.json", 64 * 1024)
+    if args.mode == "seal" and report["ok"] and report.get("verified_seal") is True:
+        if os.environ.get("GITHUB_OUTPUT"):
+            with open(os.environ["GITHUB_OUTPUT"], "a") as outputs:
+                outputs.write(f"archive_path={report['archive_path']}\nverified=true\n")
     print(f"{args.mode}: {'PASS' if report['ok'] else 'FAIL'}" + (f": {report['error']}" if 'error' in report else ""))
     return 0 if report["ok"] else 1
 

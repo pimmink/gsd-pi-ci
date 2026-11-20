@@ -39,6 +39,14 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      - name: Offline preflight source-byte regression (real Linux fences)
+        env:
+          PYTHONPATH: scripts:scripts/tests
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          python3 -c 'import sys; print("Actual platform:", sys.platform); sys.exit(0 if sys.platform == "linux" else "Expected actual Linux")'
+          python3 -m unittest test_native_cmux_source_bytes.RealSourceBytesTests.test_preflight_rejects_changed_source_before_platform_tools -v
       - name: Observe only this new run (mandatory external parent guard owns cancellation)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -165,12 +173,73 @@ jobs:
         if: always()
         run: |
           python3 harness/scripts/native_cmux.py diagnostics --tag "$BUILD_TAG" --output evidence
-      - name: Upload bounded build evidence/artifact, never a release
+      - name: Validate and seal same-byte app staging
+        id: app_seal
+        if: always() && steps.package.outcome == 'success' && steps.diagnostics.outcome == 'success'
+        env:
+          PACKAGE_OUTCOME: ${{ steps.package.outcome }}
+          DIAGNOSTICS_OUTCOME: ${{ steps.diagnostics.outcome }}
+        run: |
+          python3 harness/scripts/native_cmux.py seal --output evidence
+      - name: Upload bounded diagnostics only, never an app archive
         if: always() && steps.diagnostics.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: d014-cmux-build-only-${{ github.run_id }}
-          path: evidence/
+          name: d014-cmux-build-diagnostics-${{ github.run_id }}
+          path: |
+            evidence/upload/prepare.json
+            evidence/upload/tools.json
+            evidence/upload/materialized.json
+            evidence/upload/preflight.json
+            evidence/upload/inspect.json
+            evidence/upload/package.json
+            evidence/upload/capture.json
+            evidence/upload/results.json
+            evidence/upload/providers.json
+            evidence/upload/providers-collection.json
+            evidence/upload/zig-setup.log
+            evidence/upload/stdout-capture.json
+            evidence/upload/build-logs.json
+            evidence/upload/build-stdout.log
+            evidence/upload/native-build.log
+            evidence/upload/artifact-files.json
+            evidence/upload/diagnostics.json
+            evidence/upload/seal.json
+            evidence/upload/source-proof--scripts--reload.sh
+            evidence/upload/source-proof--scripts--lib--mobile-attach.sh
+            evidence/upload/source-proof--scripts--lib--dev-secrets.sh
+            evidence/upload/source-proof--scripts--lib--tagged-reload-lock.py
+            evidence/upload/source-proof--scripts--ghostty-zig-version.sh
+            evidence/upload/source-proof--scripts--install-zig-ci.sh
+            evidence/upload/source-proof--scripts--lib--dev-backend-origin.sh
+            evidence/upload/source-proof--scripts--ensure-ghosttykit.sh
+            evidence/upload/source-proof--scripts--build-ghostty-cli-helper.sh
+            evidence/upload/source-proof--scripts--build-cmux-cua.sh
+            evidence/upload/source-proof--scripts--ci--resolve-cmux-tui-client-commit.sh
+            evidence/upload/source-proof--scripts--install-cmux-tui-client.sh
+            evidence/upload/source-proof--scripts--install-coderouter-client.sh
+            evidence/upload/source-proof--scripts--local-build-cache-preflight.py
+            evidence/upload/source-proof--scripts--ci--swift_incremental_diagnostics.py
+            evidence/upload/source-proof--cmux.xcodeproj--project.pbxproj
+            evidence/upload/source-proof--.gitmodules
+            evidence/upload/source-proof--Resources--Info.plist
+            evidence/upload/source-proof--TunnelExtension--Info.plist
+            evidence/upload/source-proof--scripts--build-app-bundled-resources.sh
+            evidence/upload/source-proof--scripts--build-plain-text-paste-worker.sh
+            evidence/upload/source-proof--scripts--build-diff-sidecar.sh
+            evidence/upload/source-proof--scripts--build-command-palette-nucleo-ffi.sh
+            evidence/upload/source-proof--Packages--macOS--CmuxCommandPalette--Sources--CmuxCommandPalette--Search--Nucleo--CommandPaletteNucleoSearchLibrary.swift
+            evidence/upload/source-proof--cmux.xcodeproj--project.xcworkspace--xcshareddata--swiftpm--Package.resolved
+            evidence/upload/source-proof--.github--workflows--ci-macos.yml
           retention-days: 1
           compression-level: 0
           if-no-files-found: warn
+      - name: Upload verified sealed app artifact, never a release
+        if: always() && steps.package.outcome == 'success' && steps.app_seal.outcome == 'success' && steps.app_seal.outputs.verified == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: d014-cmux-build-only-${{ github.run_id }}
+          path: ${{ steps.app_seal.outputs.archive_path }}
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error

@@ -461,7 +461,7 @@ class PackagingTests(unittest.TestCase):
                     binary.write_bytes(b'changed')
                 def ditto(*args):
                     self.assertEqual(args[0], 'ditto')
-                    (out / 'cmux-build-only.zip').write_bytes(b'partial fixture')
+                    Path(args[-1]).write_bytes(b'partial fixture')
                     if failure == 'partial':
                         raise ValueError('tool failed')
                     return ''
@@ -792,7 +792,7 @@ class ReworkTests(unittest.TestCase):
         (self.out / 'cmux-build-only.zip').write_bytes(b'oversize')
         with patch.object(native, 'MAX_UPLOAD', 1024), self.assertRaises(ValueError):
             finalize(self.out)
-        self.assertFalse((self.out / 'cmux-build-only.zip').exists())
+        self.assertEqual((self.out / 'cmux-build-only.zip').read_bytes(), b'oversize')
 
     def test_f2_same_bytes_symlink_swap_during_copy_is_never_followed(self):
         outside = self.app.parent / 'same-bytes-outside'
@@ -1009,15 +1009,63 @@ class D015RecipeTests(unittest.TestCase):
         self.assertFalse(Path(report['derived_data']).exists())
         self.assertIn('NATIVE_APP_PATH=' + report['app'], Path(self.env['GITHUB_ENV']).read_text())
 
+    def diagnostics_cli(self):
+        collect = native.collect_build_logs
+        with patch.object(native, 'collect_build_logs', side_effect=lambda output, tag:
+                          collect(output, tag, temp_root=self.base / 'native-log-input')), \
+             patch.object(sys, 'argv', ['native_cmux.py', 'diagnostics', '--tag', TAG, '--output', str(self.out)]), \
+             contextlib.redirect_stdout(io.StringIO()):
+            code = native.main()
+        return code, json.loads((self.out / 'diagnostics.json').read_text())
+
     def test_source_proofs_preserve_flat_final_upload_and_size_cap_contract(self):
         self.prepare()
-        native.finalize_evidence(self.out)
-        manifest = json.loads((self.out / 'artifact-files.json').read_text())
-        self.assertTrue(any(f['path'].startswith('source-proof--') for f in manifest['files']))
-        self.assertTrue(all(p.is_file() for p in self.out.iterdir()))
-        with patch.object(native, 'MAX_UPLOAD', 10):
+        code, report = self.diagnostics_cli()
+        self.assertEqual(code, 0)
+        self.assertTrue(report['ok'])
+        stage = self.out / 'upload'
+        self.assertFalse((self.out / 'artifact-files.json').exists())
+        manifest = json.loads((stage / 'artifact-files.json').read_text())
+        rows = {row['path']: row for row in manifest['files']}
+        proofs = {'source-proof--' + relative.replace('/', '--'): digest
+                  for relative, digest in native.SOURCE_FILES.items()}
+        self.assertEqual({name for name in rows if name.startswith('source-proof--')}, set(proofs))
+        self.assertTrue(all(p.is_file() and p.suffix != '.zip' for p in stage.iterdir()))
+        for name, digest in proofs.items():
+            self.assertEqual(rows[name]['sha256'], digest)
+            self.assertEqual(rows[name]['bytes'], (stage / name).stat().st_size)
+            self.assertEqual(native.sha256(stage / name), digest)
+            self.assertNotEqual((stage / name).stat().st_ino, (self.out / name).stat().st_ino)
+
+        # Fresh production staging: only proofs consume this cap. Dropping them
+        # would incorrectly pass, unlike the old cap10/reused-stage assertion.
+        capped = self.base / 'capped-proof-evidence'
+        capped.mkdir()
+        for name in proofs:
+            shutil.copyfile(self.out / name, capped / name)
+        proof_bytes = sum((capped / name).stat().st_size for name in proofs)
+        with patch.object(native, 'MAX_UPLOAD', 64 * 1024 + proof_bytes - 1):
             with self.assertRaisesRegex(ValueError, 'upload cap'):
-                native.finalize_evidence(self.out)
+                native.finalize_evidence(capped)
+        self.assertEqual({p.name for p in (capped / 'upload').iterdir()}, set(proofs))
+
+    def test_changed_source_proof_rejected_by_diagnostics_cli(self):
+        self.prepare()
+        relative = next(iter(native.SOURCE_FILES))
+        (self.out / ('source-proof--' + relative.replace('/', '--'))).write_bytes(b'changed offline proof')
+        code, report = self.diagnostics_cli()
+        self.assertEqual(code, 1)
+        self.assertFalse(report['ok'])
+        self.assertIn('Retained pinned source proof mismatch', report['error'])
+
+    def test_unlisted_source_proof_is_not_uploaded_by_diagnostics_cli(self):
+        self.prepare()
+        unknown = 'source-proof--unlisted-fixture.sh'
+        (self.out / unknown).write_bytes(b'unlisted offline diagnostic fixture')
+        code, report = self.diagnostics_cli()
+        self.assertEqual(code, 0)
+        self.assertTrue(report['ok'])
+        self.assertFalse((self.out / 'upload' / unknown).exists())
 
     def test_tools_recheck_ci_identity_even_if_preparation_file_exists(self):
         self.prepare()

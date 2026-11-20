@@ -7,12 +7,14 @@ import shutil
 import subprocess
 import tempfile
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import native_cmux as native
 import native_cmux_providers as providers
+import native_cmux_fence as fences
 
 
 class RealSourceBytesTests(unittest.TestCase):
@@ -178,9 +180,19 @@ class RealSourceBytesTests(unittest.TestCase):
     def test_preflight_rejects_changed_source_before_platform_tools(self):
         self.git("update-index", "--assume-unchanged", "nested/other")
         (self.source / "nested/other").write_bytes(b"bad preflight source\n")
-        with patch.object(native, "run", side_effect=AssertionError("must reject before native probes")):
+        actual_platform = sys.platform
+        # Rebind only native's platform view. The real fence module keeps the
+        # actual kernel's sys.platform (inotify on Linux, kqueue on macOS).
+        with patch.object(native, "sys", SimpleNamespace(platform="darwin")), \
+             patch.object(native, "run", side_effect=AssertionError("must reject before native probes")) as probes:
+            self.assertEqual(sys.platform, actual_platform)
+            self.assertIs(fences.sys, sys)
+            self.assertEqual(fences.sys.platform, actual_platform)
             with self.assertRaisesRegex(ValueError, "Pinned source:"):
                 native.preflight(self.source, "d014-source-byte-fixture", {})
+            probes.assert_not_called()
+        self.assertIs(native.sys, sys)
+        self.assertEqual(sys.platform, actual_platform)
 
     def test_replace_ref_does_not_replace_pinned_object_authority(self):
         original = self.head

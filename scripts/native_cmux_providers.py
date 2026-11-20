@@ -8,6 +8,7 @@ Unsupported manifests/products and unavailable cache evidence fail closed.
 """
 import argparse
 from contextlib import ExitStack
+import errno
 import hashlib
 import io
 import json
@@ -32,6 +33,14 @@ EXTRA_SOURCE = {
     "Packages/Shared/CmuxSentryTelemetry/Package.swift": "600a8d2d8f55d27d2a65063808e2d1972965f3b8561bfdba1f71b5ba4b31ca29",
 }
 MAX_BYTES = 400 * 1024**2
+# Exact Package.swift at the stock lock's ee19f156667ca640b912108a45f8b5bb8d156fec.
+# Only this known conditional is selected here; arbitrary Swift remains unsupported.
+IROH_MANIFEST_SHA256 = "176b8a1e0b51eb76392055f94c3c7dc77fc1805d9e8be689299e8801810409a9"
+IROH_LOCAL_BINARIES = (
+    "Iroh.xcframework/macos-arm64_x86_64/Iroh.framework/Versions/A/Iroh",
+    "Iroh.xcframework/macos-x86_64_arm64/Iroh.framework/Versions/A/Iroh",
+    "Iroh.xcframework/macos-arm64/Iroh.framework/Versions/A/Iroh",
+)
 DEVELOPMENT = {"Headers", "PrivateHeaders", "Modules"}
 
 
@@ -244,7 +253,49 @@ def calls(text, function):
     return result
 
 
-def binary_targets(manifest, product):
+def iroh_probe_stat(path):
+    """Only ENOENT proves absence; inaccessible/failed metadata is not evidence."""
+    try:
+        return path.lstat()
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            return None
+        raise ValueError("Provider contract: Iroh local probe failed; absence is unproven") from exc
+
+
+def selected_manifest(manifest, product, checkout, bindings):
+    """Select only the exact pinned Iroh ternary, using its actual input conditions."""
+    marker = "let irohBinary: Target = useLocalXcframework"
+    if marker not in manifest:
+        return manifest
+    require(product == "IrohLib" and digest(manifest.encode()) == IROH_MANIFEST_SHA256,
+            "unsupported/unpinned conditional provider manifest")
+    require(checkout is not None and bindings is not None,
+            "unproven Iroh remote/local selection inputs")
+    checkout = bindings.directory(checkout)
+    # Swift uses != nil, so even an empty value forces the release distribution.
+    if "IROH_FORCE_REMOTE_XCFRAMEWORK" not in os.environ:
+        for relative in IROH_LOCAL_BINARIES:
+            path, parts = checkout, PurePosixPath(relative).parts
+            for index, part in enumerate(parts):
+                path = path / part
+                observed = iroh_probe_stat(path)
+                if observed is None:
+                    break
+                require(index < len(parts) - 1,
+                        "selected local Iroh input is not a proven remote distribution")
+                require(stat.S_ISDIR(observed.st_mode), "nonphysical Iroh selection input")
+                bindings.directory(path)
+    # The complete manifest hash above binds the three paths, env-key semantics,
+    # condition, wrapper and remote expression. Do not evaluate unrelated Swift.
+    start = manifest.index(marker)
+    remote = manifest.index("    : .binaryTarget(", start)
+    end = manifest.index("\n\nlet package =", remote)
+    return manifest[:start] + "let irohBinary: Target = " + manifest[remote + 6:end] + manifest[end:]
+
+
+def binary_targets(manifest, product, *, checkout=None, bindings=None):
+    manifest = selected_manifest(manifest, product, checkout, bindings)
     # Remove comments without touching URL strings. Computed expressions are not
     # treated as evidence. Literal constants/interpolation cover release manifests.
     text = re.sub(r'("(?:[^"\\]|\\.)*")|//[^\n]*|/\*[\s\S]*?\*/',
@@ -283,13 +334,23 @@ def binary_targets(manifest, product):
         require(name in wrappers, "unproven selected target " + name)
         active.add(name)
         deps = wrappers[name].get("dependencies", "[]")
-        # Never silently ignore conditional/external/dynamic dependency syntax.
-        try:
-            deps = json.loads(deps)
-        except json.JSONDecodeError:
-            raise ValueError("Provider contract: unsupported selected target dependency configuration") from None
-        require(isinstance(deps, list) and all(isinstance(d, str) for d in deps), "unsupported target dependencies")
-        for dependency in deps:
+        # Support literal strings and the exact Swift .byName(name: "Iroh")
+        # form used by the pinned wrapper; conditional/external/dynamic forms
+        # still fail closed rather than silently dropping a selected edge.
+        require(deps.startswith("[") and deps.endswith("]"),
+                "unsupported selected target dependency configuration")
+        expressions = split_args(deps[1:-1])
+        if expressions and not expressions[-1]:
+            expressions.pop()  # Swift's optional trailing array comma.
+        for expression in expressions:
+            by_name = re.fullmatch(r'\.byName\(\s*name\s*:\s*("(?:[^"\\]|\\.)*")\s*\)', expression)
+            literal = by_name.group(1) if by_name else expression
+            require(re.fullmatch(r'"(?:[^"\\]|\\.)*"', literal) is not None,
+                    "unsupported selected target dependency configuration")
+            try:
+                dependency = json.loads(literal)
+            except json.JSONDecodeError:
+                raise ValueError("Provider contract: unsupported selected target dependency configuration") from None
             visit(dependency)
         active.remove(name)
     for target in targets:
@@ -480,7 +541,7 @@ def _derive(source, packages, archives, bindings):
         blob = git_blob(checkout, pin["state"]["revision"], "Package.swift")
         physical, manifest_file = bindings.read(checkout / "Package.swift")
         require(blob == physical, "provider working manifest differs from locked Git object")
-        targets = binary_targets(blob.decode(), product)
+        targets = binary_targets(blob.decode(), product, checkout=checkout, bindings=bindings)
         for target in targets:
             candidates = archive_index.get(target["checksum"], [])
             require(len(candidates) == 1, "missing/ambiguous checksum-verified archive for " + identity + "/" + target["name"])
