@@ -285,8 +285,22 @@ still cannot clear independent exact-code review, accounting or execution admiss
   that tree against the frozen inspection,
   archives only that copy, and verifies **every actual ZIP member**, type, mode,
   target and file hash against the full inventory. It rechecks original/copy after
-  archival. Added/missing/duplicate/mutated members fail and remove only the newly
-  created archive. A changed, partial or oversized archive is not uploaded. This is
+  archival. The ZIP stays attempt-private until all fence exit validation passes,
+  then is published without overwriting an intervening artifact. Cleanup touches
+  only attempt-private paths; public archive paths are never destructively unlinked.
+  Diagnostics copy only explicitly allowed bounded files into a fresh private upload
+  directory and never admit a ZIP. The fixed pinned source-proof catalog is included
+  with copy-stream and retained-file SHA-256 checks; unlisted files remain excluded.
+  Every diagnostic action path, including the final bounded seal receipt, shares
+  that staging directory so artifact delivery stays flat. Proof bytes count toward
+  the combined upload cap. A separate seal step requires successful package
+  and diagnostic outcomes plus the verified package receipt, then independently
+  hashes the actual retained archive after making it read-only in a private sealed
+  directory. Only that successful step exports an app upload path/verified signal.
+  The distinct app upload positively requires package success, seal success and the
+  verified signal; rejection remains failure even if private cleanup fails. Combined
+  app/diagnostic bytes retain the 400 MiB ceiling. Failure logs remain available
+  without an app ZIP. This is
   content/copy/archive verification, not OS immutable flags or a compromised-runner
   defence.
 
@@ -349,6 +363,15 @@ helper/resource; there is no guessed Sparkle helper list or caller allow-missing
 Selected static archives are link inputs, not invented runtime requirements. Other
 platform slices/development headers are not host runtime payloads. Runtime helper
 Mach-O/minOS/dyld checks remain unchanged; remote SSH DATA classification is unchanged.
+The exact locked Iroh manifest's local/remote ternary is selected from its real
+conditions: presence of `IROH_FORCE_REMOTE_XCFRAMEWORK` (even an empty value), or
+absence of all three manifest-declared local binary probes. Existing probe ancestors
+remain bound through verification; an active/unproven local input fails closed.
+Only ENOENT proves a missing local probe; I/O, permission and non-directory failures
+reject unproven selection rather than being treated as absence.
+Only that SHA-256-bound manifest conditional and its literal `.byName(name: "Iroh")`
+wrapper edge are supported, not a general Swift evaluator. Other conditional,
+external or computed dependency forms remain unsupported.
 Unknown embedded providers and unsupported/unproven manifest/configuration/layouts
 fail closed instead of returning a successful “completeness unknown” receipt.
 

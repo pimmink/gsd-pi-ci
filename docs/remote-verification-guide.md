@@ -161,7 +161,24 @@ That guide defines the pinned cmux source, explicit standard Intel runner, one-b
 limit, prerequisite/compatibility checks, mandatory **sole external parent guard**
 for the exact new run, and minute-14 diagnosis to leave queued state before minute 15.
 The internal Linux observer is read-only (`--observe-only`, `actions: read`); it never
-cancels, and its start is not native-job start. The parent must preflight ownership,
+cancels, and its start is not native-job start. After checkout, before observing, it
+checks that the real `sys.platform` is `linux` and runs only
+`RealSourceBytesTests.test_preflight_rejects_changed_source_before_platform_tools`
+with `PYTHONPATH=scripts:scripts/tests` and `PYTHONDONTWRITEBYTECODE=1`. This uses real
+Git fixtures/Linux directory fences, not a global platform override; Linux evidence
+remains pending until that step actually runs in the one authorized native workflow.
+It is not a new job, dispatch, artifact prerequisite or cancellation authority.
+Diagnostics upload only explicit non-ZIP filenames from fresh `evidence/upload/`
+staging, including the fixed pinned source-proof catalog and bounded seal receipt;
+never the public evidence tree. All diagnostic paths share that flat upload root.
+Source-proof copy/retained hashes must match the pinned catalog and their bytes
+count toward the combined upload cap; unlisted proofs are not admitted. App upload
+is separate and requires actual package success, seal-step success and its positive
+verified output. The seal validates the retained bytes against the package proof,
+marks the private archive/directory read-only, and checks the combined 400 MiB budget.
+A rejection cannot become admission if cleanup fails; failure diagnostics remain
+without a ZIP. Public archive replacements and Iroh fail-closed probing are preserved.
+The parent must preflight ownership,
 monitor the guard heartbeat and reconcile unknown cancellation/network races without
 retry/redispatch. This is a strict queue condition, not an outage-proof guarantee.
 The linked guide also defines full-inventory/private-copy/actual-ZIP verification,
