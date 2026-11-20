@@ -200,6 +200,40 @@ class SealedAppAdmissionTests(unittest.TestCase):
             self.assertEqual(self.run_mode("diagnostics")[0], 0)
         self.assertFalse(any(p.suffix == ".zip" for p in (self.root / "upload").iterdir()))
 
+    def test_provider_failure_and_bounded_zig_log_retained_without_zip(self):
+        reason = "offline fixture provider collection failure"
+        with patch.object(providers, "collect", side_effect=ValueError(reason)), \
+             patch.object(sys, "argv", ["native_cmux_providers.py", "--source", str(self.root / "source"),
+                                        "--derived-data", str(self.root / "derived"),
+                                        "--output", str(self.root / "providers.json")]), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(providers.main(), 1)
+        self.assertFalse((self.root / "providers.json").exists())
+        raw = b"discarded Zig installer fixture prefix\n" * 32 + b"Zig fixture complete\n"
+        with patch.object(native, "LOG_LIMIT", 256):
+            zig = native.retain_log(raw, self.root, "zig-setup.log", len(raw), "offline installer stdout fixture")
+            (self.root / "tools.json").write_text(json.dumps({"ok": False, "zig_setup_stdout": zig}))
+            self.diagnostics()
+        stage = self.root / "upload"
+        failure = json.loads((stage / "providers-collection.json").read_text())
+        self.assertFalse(failure["ok"])
+        self.assertEqual(failure["error"], reason)
+        tools = json.loads((stage / "tools.json").read_text())
+        self.assertEqual(tools["zig_setup_stdout"]["path"], "zig-setup.log")
+        self.assertTrue(zig["truncated"])
+        self.assertEqual((stage / "zig-setup.log").read_bytes(), raw[-256:])
+        self.assertLessEqual((stage / "zig-setup.log").stat().st_size, 256)
+        manifest = json.loads((stage / "artifact-files.json").read_text())
+        rows = {row["path"]: row for row in manifest["files"]}
+        for name in ("providers-collection.json", "zig-setup.log"):
+            self.assertEqual(rows[name]["sha256"], native.sha256(stage / name))
+            self.assertEqual(rows[name]["sha256"], native.sha256(self.root / name))
+            self.assertEqual(rows[name]["bytes"], (stage / name).stat().st_size)
+        self.assertTrue((self.root / "cmux-build-only.zip").is_file())
+        self.assertFalse(any(p.suffix == ".zip" for p in stage.iterdir()))
+        self.assertNotIn("cmux-build-only.zip", rows)
+        self.assertEqual((self.root / "github-output").read_text(), "")
+
     def test_accepted_package_exports_only_readonly_same_byte_staging(self):
         self.diagnostics()
         code, outputs = self.run_mode("seal")

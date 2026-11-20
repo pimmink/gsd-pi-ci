@@ -170,7 +170,9 @@ remains pending until that step actually runs in the one authorized native workf
 It is not a new job, dispatch, artifact prerequisite or cancellation authority.
 Diagnostics upload only explicit non-ZIP filenames from fresh `evidence/upload/`
 staging, including the fixed pinned source-proof catalog and bounded seal receipt;
-never the public evidence tree. All diagnostic paths share that flat upload root.
+never the public evidence tree. Provider collection failure reasons in
+`providers-collection.json` and the bounded `zig-setup.log` referenced by tools
+receipts are explicitly retained too. All diagnostic paths share that flat upload root.
 Source-proof copy/retained hashes must match the pinned catalog and their bytes
 count toward the combined upload cap; unlisted proofs are not admitted. App upload
 is separate and requires actual package success, seal-step success and its positive

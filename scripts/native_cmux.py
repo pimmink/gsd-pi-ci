@@ -1139,6 +1139,7 @@ def collect_build_logs(output, tag, temp_root=Path("/tmp")):
 DIAGNOSTIC_FILES = (
     "prepare.json", "tools.json", "materialized.json", "preflight.json", "inspect.json",
     "package.json", "capture.json", "results.json", "providers.json", "stdout-capture.json",
+    "providers-collection.json", "zig-setup.log",
     "build-logs.json", "build-stdout.log", "native-build.log",
     # Fixed pinned catalog, never a source-proof glob or arbitrary evidence tree.
     *("source-proof--" + relative.replace("/", "--") for relative in SOURCE_FILES),

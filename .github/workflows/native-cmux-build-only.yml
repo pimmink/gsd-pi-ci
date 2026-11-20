@@ -196,6 +196,8 @@ jobs:
             evidence/upload/capture.json
             evidence/upload/results.json
             evidence/upload/providers.json
+            evidence/upload/providers-collection.json
+            evidence/upload/zig-setup.log
             evidence/upload/stdout-capture.json
             evidence/upload/build-logs.json
             evidence/upload/build-stdout.log
