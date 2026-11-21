@@ -51,9 +51,12 @@ gitlink commits. Regular-file bytes/executable modes, entry types, symlink targe
 bytes and initialized submodule HEADs must match. The producer/configuration/lock
 allowlists remain additional constraints, not the inventory boundary. Persistent
 subtree/ancestor rename fences and before/after physical inventory comparisons
-remain held for the complete candidate. Git-index status, assume-unchanged and
-skip-worktree flags are not byte authority; index-only disagreement is not a
-tracked-source byte failure.
+remain held for the complete candidate. Each binding owner shares one event queue
+and one descriptor per distinct physical directory path, without dropping any
+subtree watch or rearming ancestors. Descriptor demand still grows with the number
+of distinct directories; insufficient capacity fails closed. Git-index status,
+assume-unchanged and skip-worktree flags are not byte authority; index-only
+disagreement is not a tracked-source byte failure.
 
 This is **not** a hermetic-build or generic Git-metadata identity attestation. The
 proof excludes Git metadata itself, untracked/ignored files (including generated,

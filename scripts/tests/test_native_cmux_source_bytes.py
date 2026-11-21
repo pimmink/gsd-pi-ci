@@ -17,6 +17,43 @@ import native_cmux_providers as providers
 import native_cmux_fence as fences
 
 
+def _check_wide_source_contract(limit, source, output, commit, tree):
+    """Child only: lower its own fd limit and check repeated source proofs."""
+    import errno
+    import fcntl
+    import resource
+
+    limit, source, output = int(limit), Path(source), Path(output)
+    native.SOURCE_SHA, native.SOURCE_TREE = commit, tree
+    native.SOURCE_FILES = {"tracked": native.sha256(source / "tracked")}
+    _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (limit, hard))
+
+    def open_fds():
+        used = set()
+        for fd in range(limit):
+            try:
+                fcntl.fcntl(fd, fcntl.F_GETFD)
+            except OSError as error:
+                if error.errno != errno.EBADF:
+                    raise
+            else:
+                used.add(fd)
+        return used
+
+    before = open_fds()
+    previous = None
+    for _ in range(3):
+        report = {}
+        native.source_contract(source, output, report)
+        proof = report["source_inventory"]
+        assert proof["tracked_files"] == 55 and proof["gitlinks"] == 1, proof
+        assert previous is None or proof == previous, proof
+        assert open_fds() == before, "source-contract descriptor leak"
+        previous = proof
+    assert (output / "source-proof--tracked").read_bytes() == (source / "tracked").read_bytes()
+
+
 class RealSourceBytesTests(unittest.TestCase):
     def git(self, *args, cwd=None, data=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
@@ -246,6 +283,32 @@ class RealSourceBytesTests(unittest.TestCase):
         self.git("add", ".", cwd=child)
         self.git("commit", "-qm", "wrong child revision", cwd=child)
         self.assert_rejected()
+
+    def test_wide_source_contract_under_reduced_fd_limit(self):
+        if sys.platform != "darwin" and not sys.platform.startswith("linux"):
+            self.skipTest("no supported directory-fence backend")
+        import resource
+
+        limit = 128
+        soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft != resource.RLIM_INFINITY and soft < limit:
+            self.skipTest(f"ambient fd limit {soft} is already below {limit}")
+        for i in range(48):
+            directory = self.source / "fanout" / "shared" / f"leaf-{i:02}"
+            directory.mkdir(parents=True)
+            (directory / "proof").write_text(f"tracked path {i}\n")
+        self.git("add", "fanout")
+        self.git("commit", "-qm", "wide tracked fixture")
+        self.pin()
+        output = self.root / "output"
+        output.mkdir()
+        child = ("import sys; from test_native_cmux_source_bytes import _check_wide_source_contract; "
+                 "_check_wide_source_contract(*sys.argv[1:])")
+        result = subprocess.run([sys.executable, "-c", child, str(limit), str(self.source), str(output),
+                                 self.head, self.tree], capture_output=True, text=True, timeout=90,
+                                env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent),
+                                     "PYTHONDONTWRITEBYTECODE": "1"})
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_provider_binding_lifetime_rechecks_nonallowlisted_source(self):
         with self.assertRaises(ValueError):
