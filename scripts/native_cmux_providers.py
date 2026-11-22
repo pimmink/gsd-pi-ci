@@ -22,7 +22,7 @@ import subprocess
 import sys
 import zipfile
 
-from native_cmux_fence import directory_fence
+from native_cmux_fence import directory_fence, directory_fences
 
 LOCK = "cmux.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
 # Source-proven macOS products, not fabricated runtime helper names. The local
@@ -142,14 +142,15 @@ def source_hashes():
 class _InputBindings(ExitStack):
     """One owner for input/ancestor watches, retained until the proof is sealed.
 
-    Deduplicate exact input directories, not overlapping ancestor chains: a
-    parent watch does not observe a descendant's own rename. Never close/rearm
-    an earlier binding between discovery, reads or derivations.
+    Share one watch per physical directory across overlapping ancestor chains.
+    Every descendant still needs its own watch; never close/rearm one between
+    discovery, reads or derivations.
     """
     def __init__(self):
         super().__init__()
         self.directories = set()
         self.sources = {}
+        self._bind_directory = None
 
     def source(self, path):
         from native_cmux_source import source_inventory
@@ -173,7 +174,9 @@ class _InputBindings(ExitStack):
     def directory(self, path):
         path = Path(path).absolute()
         if path not in self.directories:
-            self.enter_context(directory_fence(path))
+            if self._bind_directory is None:
+                self._bind_directory = self.enter_context(directory_fences())
+            self._bind_directory(path)
             self.directories.add(path)
         return path.resolve(strict=True)
 

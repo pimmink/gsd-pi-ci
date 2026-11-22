@@ -999,7 +999,26 @@ class D015RecipeTests(unittest.TestCase):
         return app
 
     def test_prepare_retains_exact_source_and_final_path(self):
-        report = self.prepare()
+        with contextlib.redirect_stdout(io.StringIO()) as log:
+            report = self.prepare()
+        before, after = [json.loads(line.removeprefix('prepare FD: ')) for line in log.getvalue().splitlines()]
+        evidence = report['prepare_source_fds']
+        self.assertEqual(before['checkpoint'], 'before')
+        self.assertEqual(after, dict(evidence, checkpoint='after_cleanup'))
+        self.assertEqual(evidence['phase'], 'prepare.source_contract')
+        self.assertEqual(evidence['result'], 'passed')
+        self.assertEqual(evidence['platform'], sys.platform)
+        self.assertEqual(evidence['python'], sys.version.split()[0])
+        self.assertEqual(evidence['machine'], os.uname().machine)
+        self.assertEqual(evidence['open_fds_before'], evidence['open_fds_after'])
+        self.assertEqual(evidence['open_fd_delta'], 0)
+        import resource
+        soft, hard = ('unlimited' if n == resource.RLIM_INFINITY else n
+                      for n in resource.getrlimit(resource.RLIMIT_NOFILE))
+        self.assertEqual(before['rlimit_nofile'], {'soft': soft, 'hard': hard})
+        if sys.platform == 'darwin':
+            ceiling = int(subprocess.check_output(['/usr/sbin/sysctl', '-n', 'kern.maxfilesperproc']))
+            self.assertEqual(before['darwin_maxfilesperproc'], ceiling)
         self.assertEqual(report['source_tree'], native.SOURCE_TREE)
         self.assertEqual(report['tag_slug'], TAG)
         self.assertEqual(report['backend'], 'local')
@@ -1008,6 +1027,40 @@ class D015RecipeTests(unittest.TestCase):
             self.assertEqual(native.sha256(self.out / ('source-proof--' + relative.replace('/', '--'))), expected)
         self.assertFalse(Path(report['derived_data']).exists())
         self.assertIn('NATIVE_APP_PATH=' + report['app'], Path(self.env['GITHUB_ENV']).read_text())
+
+    def test_prepare_source_rejection_keeps_fd_evidence_and_gate(self):
+        report = {}
+        error = ValueError('fixture source proof rejected')
+        log = io.StringIO()
+
+        def reject(*args):
+            before, = log.getvalue().splitlines()
+            self.assertEqual(json.loads(before.removeprefix('prepare FD: '))['checkpoint'], 'before')
+            with tempfile.TemporaryFile():
+                raise error
+
+        with contextlib.redirect_stdout(log), patch.object(native, 'source_contract', side_effect=reject):
+            with self.assertRaises(ValueError) as raised:
+                native.prepare_recipe(self.source, TAG, self.out, report)
+        self.assertIs(raised.exception, error)
+        self.assertEqual(report['prepare_source_fds']['result'], 'failed')
+        self.assertEqual(report['prepare_source_fds']['error_type'], 'ValueError')
+        self.assertEqual(report['prepare_source_fds']['open_fd_delta'], 0)
+        self.assertIn('after_cleanup', log.getvalue())
+        self.assertNotIn(str(error), log.getvalue())
+        self.assertFalse(native.recipe_paths(TAG)[0].exists())
+        self.assertFalse(Path(self.env['GITHUB_ENV']).exists())
+
+    def test_prepare_fd_snapshot_excludes_observer_and_is_bounded(self):
+        before = native._prepare_open_fd_count()
+        self.assertIsInstance(before, int)
+        with tempfile.TemporaryFile():
+            self.assertEqual(native._prepare_open_fd_count(), before + 1)
+        self.assertEqual(native._prepare_open_fd_count(), before)
+        with patch.object(native, '_PREPARE_FD_SCAN_CAP', 0):
+            self.assertIsNone(native._prepare_open_fd_count())
+        with patch.object(native.os, 'scandir', side_effect=PermissionError):
+            self.assertIsNone(native._prepare_open_fd_count())
 
     def diagnostics_cli(self):
         collect = native.collect_build_logs

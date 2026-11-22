@@ -18,7 +18,25 @@ REAL_GIT_BLOB = providers.git_blob
 REAL_GIT_OUTPUT = providers.git_output
 REAL_CHECK_OUTPUT = providers.subprocess.check_output
 REAL_FENCE = providers.directory_fence
+REAL_FENCES = providers.directory_fences
 BINDING_ERROR = r"Directory/ancestor rename, deletion, revoke or event overflow"
+
+
+@contextmanager
+def observe_fences(tracked):
+    @contextmanager
+    def shared():
+        with ExitStack() as observations, REAL_FENCES() as bind:
+            @contextmanager
+            def fence(path):
+                bind(path)
+                yield
+
+            yield lambda path: observations.enter_context(tracked(path, fence))
+
+    with patch.object(providers, 'directory_fence', side_effect=tracked), \
+            patch.object(providers, 'directory_fences', side_effect=shared):
+        yield
 
 
 class InputBindingTests(unittest.TestCase):
@@ -266,9 +284,9 @@ class InputBindingTests(unittest.TestCase):
         active, entered, exited = [], [], []
 
         @contextmanager
-        def tracked(path):
+        def tracked(path, fence=REAL_FENCE):
             path = Path(path)
-            with REAL_FENCE(path):
+            with fence(path):
                 active.append(path)
                 entered.append(path)
                 try:
@@ -277,7 +295,7 @@ class InputBindingTests(unittest.TestCase):
                     active.remove(path)
                     exited.append(path)
 
-        with patch.object(providers, 'directory_fence', side_effect=tracked):
+        with observe_fences(tracked):
             providers.collect(f.provider_source, f.provider_packages, [cache], output)
             self.assertFalse(active)
             self.assertEqual(len(entered), len(exited))
@@ -369,15 +387,15 @@ class InputBindingTests(unittest.TestCase):
         opened, closed = [], []
 
         @contextmanager
-        def tracked(path):
-            with REAL_FENCE(path):
+        def tracked(path, fence=REAL_FENCE):
+            with fence(path):
                 opened.append(Path(path))
                 try:
                     yield
                 finally:
                     closed.append(Path(path))
 
-        with patch.object(providers, 'directory_fence', side_effect=tracked):
+        with observe_fences(tracked):
             with providers._InputBindings() as bindings:
                 for _ in range(3):
                     bindings.directory(f.provider_source)
@@ -399,14 +417,14 @@ class InputBindingTests(unittest.TestCase):
         reached = []
 
         @contextmanager
-        def fail_setup(path):
+        def fail_setup(path, fence=REAL_FENCE):
             if Path(path) == target:
                 reached.append(True)
                 raise OSError('injected watcher acquisition failure')
-            with REAL_FENCE(path):
+            with fence(path):
                 yield
 
-        with patch.object(providers, 'directory_fence', side_effect=fail_setup):
+        with observe_fences(fail_setup):
             with self.assertRaisesRegex(OSError, '^injected watcher acquisition failure$'):
                 providers.collect(f.provider_source, f.provider_packages, [cache], output)
         self.assertEqual(reached, [True])
