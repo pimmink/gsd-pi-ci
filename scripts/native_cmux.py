@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """D014/D015 isolated-CI preparation and non-executing artifact checks (stdlib only)."""
 import argparse
+from contextlib import contextmanager
+import errno
 import hashlib
+from itertools import islice
 import json
 import os
 from pathlib import Path
@@ -13,6 +16,7 @@ import tempfile
 import zipfile
 import subprocess
 import sys
+import time
 from native_cmux_fence import directory_fence, fenced
 
 SOURCE_REPO = "pimmink/cmux"
@@ -881,13 +885,101 @@ def check_native_absence():
     require("cmux" not in run("/bin/launchctl", "list").lower(), "Existing cmux launchd state")
 
 
+_PREPARE_FD_SCAN_CAP = 16384
+
+
+def _prepare_open_fd_count():
+    """Bound the scan and count after closing its own enumeration descriptor."""
+    import fcntl
+
+    try:
+        with os.scandir("/dev/fd") as entries:
+            names = [entry.name for entry in islice(entries, _PREPARE_FD_SCAN_CAP + 1)]
+        if len(names) > _PREPARE_FD_SCAN_CAP:
+            return None
+        count = 0
+        for name in names:
+            if name.isdecimal():
+                try:
+                    fcntl.fcntl(int(name), fcntl.F_GETFD)
+                except OSError as exc:
+                    if exc.errno != errno.EBADF:
+                        raise
+                else:
+                    count += 1
+        return count
+    except OSError:
+        return None
+
+
+def _darwin_maxfilesperproc():
+    """Read the kernel ceiling as well as RLIMIT_NOFILE without a child process."""
+    if sys.platform == "darwin":
+        import ctypes
+
+        try:
+            sysctl = ctypes.CDLL(None).sysctlbyname
+            value = ctypes.c_int()
+            size = ctypes.c_size_t(ctypes.sizeof(value))
+            if (sysctl(b"kern.maxfilesperproc", ctypes.byref(value), ctypes.byref(size), None,
+                       ctypes.c_size_t(0)) == 0 and size.value == ctypes.sizeof(value) and value.value > 0):
+                return value.value
+        except (AttributeError, OSError):
+            pass
+    return None
+
+
+@contextmanager
+def _prepare_source_fd_diagnostics(report):
+    import resource
+
+    try:
+        soft, hard = ("unlimited" if limit == resource.RLIM_INFINITY else limit
+                      for limit in resource.getrlimit(resource.RLIMIT_NOFILE))
+    except (OSError, ValueError):
+        soft = hard = None
+    before = _prepare_open_fd_count()
+    evidence = report["prepare_source_fds"] = {
+        "phase": "prepare.source_contract", "platform": sys.platform, "machine": os.uname().machine,
+        "python": sys.version.split()[0], "implementation": sys.implementation.name,
+        "rlimit_nofile": {"soft": soft, "hard": hard}, "darwin_maxfilesperproc": _darwin_maxfilesperproc(),
+        "open_fds_before": before,
+    }
+
+    def emit(checkpoint):
+        try:
+            print("prepare FD: " + json.dumps({"checkpoint": checkpoint, **evidence}), flush=True)
+        except (OSError, ValueError):
+            pass  # Evidence polling/logging must not change source acceptance.
+
+    emit("before")
+    started = time.monotonic()
+    try:
+        yield
+    except Exception as exc:
+        evidence["error_type"] = type(exc).__name__
+        if isinstance(exc, OSError):
+            evidence["errno"] = exc.errno
+        raise
+    else:
+        evidence["result"] = "passed"
+    finally:
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        after = _prepare_open_fd_count()
+        evidence.setdefault("result", "failed")
+        evidence.update(elapsed_ms=elapsed_ms, open_fds_after=after,
+                        open_fd_delta=after - before if before is not None and after is not None else None)
+        emit("after_cleanup")
+
+
 def prepare_recipe(source, tag, output, report):
     """CI-only: reject all pre-existing native state BEFORE tools or the sole build."""
     ci_identity()
     root, derived, app = recipe_paths(tag)
     require(not os.path.lexists(root), "Per-run path collision")
     check_native_absence()
-    source_contract(source, output, report)
+    with _prepare_source_fd_diagnostics(report):
+        source_contract(source, output, report)
     root.mkdir(mode=0o700)
     report.update(tag=tag, tag_slug=tag, app_name=f"cmux DEV {tag}", app=str(app),
                   derived_data=str(derived), recipe_root=str(root), backend="local",

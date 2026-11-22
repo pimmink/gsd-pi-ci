@@ -15,6 +15,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import native_cmux as native
 import native_cmux_providers as providers
 import native_cmux_fence as fences
+import native_cmux_source as source_reader
+
+
+def _open_fd_snapshot():
+    """Observe live descriptors without holding a /dev/fd enumeration fd."""
+    import errno
+    import fcntl
+
+    result = set()
+    for entry in os.listdir("/dev/fd"):
+        if not entry.isdecimal():
+            continue
+        fd = int(entry)
+        try:
+            fcntl.fcntl(fd, fcntl.F_GETFD)
+        except OSError as error:
+            if error.errno != errno.EBADF:
+                raise
+        else:
+            result.add(fd)
+    return result
 
 
 def _check_wide_source_contract(limit, source, output, commit, tree):
@@ -283,6 +304,90 @@ class RealSourceBytesTests(unittest.TestCase):
         self.git("add", ".", cwd=child)
         self.git("commit", "-qm", "wrong child revision", cwd=child)
         self.assert_rejected()
+
+    def test_valid_large_tree_uses_high_fd_poll_and_reaps_readers(self):
+        import resource
+
+        limits = resource.getrlimit(resource.RLIMIT_NOFILE)
+        for i in range(1100):
+            directory = self.source / "fanout" / f"leaf-{i:04}"
+            directory.mkdir(parents=True)
+            (directory / "proof").write_text(f"valid tracked leaf {i}\n")
+        self.git("add", "fanout")
+        self.git("commit", "-qm", "valid large source fixture")
+        self.pin()
+        output = self.root / "high-fd-evidence"
+        output.mkdir()
+        children, registrations, waits = [], [], []
+        popen, poll_factory = subprocess.Popen, source_reader.select.poll
+
+        def spawn(*args, **kwargs):
+            child = popen(*args, **kwargs)
+            children.append(child)
+            return child
+
+        class ObservedPoll:
+            def __init__(self):
+                self.delegate = poll_factory()
+
+            def register(self, descriptor, events):
+                registrations.append(descriptor.fileno())
+                return self.delegate.register(descriptor, events)
+
+            def poll(self, timeout):
+                waits.append(timeout)
+                return self.delegate.poll(timeout)
+
+        baseline = _open_fd_snapshot()
+        proof = None
+        with patch.object(subprocess, "Popen", side_effect=spawn), \
+             patch.object(source_reader.select, "poll", side_effect=ObservedPoll), \
+             patch.object(native, "SOURCE_FILES", {"tracked": native.sha256(self.source / "tracked")}):
+            for _ in range(2):
+                report = {}
+                native.source_contract(self.source, output, report)
+                self.assertEqual(_open_fd_snapshot(), baseline)
+                inventory = report["source_inventory"]
+                self.assertGreaterEqual(inventory["tracked_files"], 1100)
+                self.assertEqual(inventory["gitlinks"], 1)
+                self.assertTrue(proof is None or proof == inventory)
+                proof = inventory
+        self.assertGreaterEqual(max(registrations), 1024)
+        self.assertTrue(waits and all(1 <= value <= 180000 for value in waits))
+        self.assertEqual(resource.getrlimit(resource.RLIMIT_NOFILE), limits)
+        self.assertTrue(children and all(child.returncode == 0 for child in children))
+        self.assertEqual(native.sha256(output / "source-proof--tracked"), native.sha256(self.source / "tracked"))
+        print(json.dumps({"valid_large_tree": True, "max_git_pipe_fd": max(registrations),
+                          "poll_timeout_max_ms": max(waits), "same_fd_set_after": True,
+                          "reaped_children": len(children), "rlimit_unchanged": True}))
+
+    def test_empty_poll_preserves_git_read_timeout_and_cleanup(self):
+        poll_factory = source_reader.select.poll
+
+        class EmptyPoll:
+            def __init__(self):
+                self.delegate = poll_factory()
+
+            def register(self, descriptor, events):
+                return self.delegate.register(descriptor, events)
+
+            def poll(self, timeout):
+                self_ready = self.delegate.poll(timeout)
+                if not self_ready:
+                    raise AssertionError("valid fixture Git reader did not become ready")
+                return []  # Ordinary readiness-timeout fault injection, no input mutation.
+
+        baseline = _open_fd_snapshot()
+        with patch.object(source_reader.select, "poll", side_effect=EmptyPoll):
+            with self.assertRaises(ValueError) as raised:
+                self.contract()
+        errors = []
+        error = raised.exception
+        while error is not None:
+            errors.append(str(error))
+            error = error.__context__
+        self.assertIn("Pinned source: Git object read timed out", errors)
+        self.assertEqual(_open_fd_snapshot(), baseline)
 
     def test_wide_source_contract_under_reduced_fd_limit(self):
         if sys.platform != "darwin" and not sys.platform.startswith("linux"):

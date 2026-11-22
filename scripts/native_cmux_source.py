@@ -8,6 +8,7 @@ watches across the entire candidate and compares inventories before publication.
 from contextlib import ExitStack
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -62,14 +63,18 @@ def _source_inventory(source, directory, processes):
                     process.wait()
                     raise ValueError("Pinned source: Git object reader did not exit") from None
             processes.callback(close)
-            readers[repo] = process, bytearray()
-        process, buffer = readers[repo]
+            # poll supports pipe descriptors above select's FD_SETSIZE and does
+            # not allocate another kernel descriptor per retained Git reader.
+            poller = select.poll()
+            poller.register(process.stdout, select.POLLIN)
+            readers[repo] = process, bytearray(), poller
+        process, buffer, poller = readers[repo]
         deadline = time.monotonic() + 180
 
         def receive(size=None):
             while (b"\n" not in buffer if size is None else len(buffer) < size):
                 remaining = deadline - time.monotonic()
-                require(remaining > 0 and select.select([process.stdout], [], [], max(0, remaining))[0],
+                require(remaining > 0 and poller.poll(math.ceil(remaining * 1000)),
                         "Pinned source: Git object read timed out")
                 chunk = os.read(process.stdout.fileno(), 65536)
                 require(chunk, "Pinned source: truncated/missing Git object")

@@ -84,7 +84,14 @@ minimal setup for the **same one future authorized fresh-CI run**, not locally:
    be exactly **26.6 / 17F113**. It rejects existing app/process/launchd/socket/tag
    state, per-run path collisions (including dangling symlinks), inherited CMUX,
    Zig/Bun or shell/loader injection overrides. It retains pinned source proof bytes
-   and SHA-256s. Missing/changed proofs fail before setup.
+   and SHA-256s. Missing/changed proofs fail before setup. At the source proof
+   boundary, `prepare FD:` records the verifier Python process's runtime,
+   `RLIMIT_NOFILE` soft/hard values, Darwin per-process kernel ceiling, and
+   bounded open-descriptor counts before the proof and after its cleanup, even
+   when the proof raises. The same summary is in `prepare.json` under
+   `prepare_source_fds`. Missing or capped observations are `null`; the count
+   delta is not a peak, an admission check, or proof that the proof fits. The
+   instrumentation does not change limits or source acceptance.
 2. Zig uses only the pinned source's `scripts/install-zig-ci.sh` with
    `ZIG_FORCE_LOCAL_INSTALL=1`, private run-specific `RUNNER_TEMP`/`ZIG_INSTALL_ROOT`,
    and the **exact** `minimum_zig_version` read by its helper from the pinned
