@@ -48,7 +48,13 @@ Prepare, preflight, provider collection and provider verification authenticate t
 pinned commit → tree → blob chain without Git replacement refs, then independently
 compare **every tracked entry** against the filesystem, recursively through pinned
 gitlink commits. Regular-file bytes/executable modes, entry types, symlink target
-bytes and initialized submodule HEADs must match. The producer/configuration/lock
+bytes and initialized submodule HEADs must match. The only non-blob file representation
+is `ghostty/example/electron-embed-windows/scripts/start-software-renderer.cmd` at
+Ghostty commit `ef4f1570d62117ebc51e3b0f07ad4f34032267b6`, blob
+`aaa36cb5a01e4f0612fc40ba150aca1d2e7d887d`: its pinned `.gitattributes` specifies
+`*.cmd text eol=crlf`. The verifier derives the exact CRLF bytes from that authenticated
+LF blob before comparing the file byte-for-byte. It does not normalize files on disk or
+trust the index, local attributes, configuration or filters. The producer/configuration/lock
 allowlists remain additional constraints, not the inventory boundary. Persistent
 subtree/ancestor rename fences and before/after physical inventory comparisons
 remain held for the complete candidate. Each binding owner shares one event queue

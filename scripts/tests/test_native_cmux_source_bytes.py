@@ -78,7 +78,7 @@ def _check_wide_source_contract(limit, source, output, commit, tree):
 class RealSourceBytesTests(unittest.TestCase):
     def git(self, *args, cwd=None, data=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-        env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+        env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_ATTR_NOSYSTEM="1",
                    GIT_AUTHOR_NAME="Fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
                    GIT_COMMITTER_NAME="Fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid")
         return subprocess.check_output(["git", *args], cwd=cwd or self.source,
@@ -148,6 +148,47 @@ class RealSourceBytesTests(unittest.TestCase):
         self.assertIn("source_inventory", report)
         self.assertEqual(report["source_inventory"]["tracked_files"], 7)
         self.assertIn("untracked", json.dumps(report["source_inventory"]["exclusions"]))
+
+    def test_pinned_crlf_checkout_requires_exact_bytes_and_binding(self):
+        seed = self.source / "seed"
+        path = "example/windows.cmd"
+        target = seed / path
+        target.parent.mkdir()
+        lf, crlf = b"echo one\necho two\n", b"echo one\r\necho two\r\n"
+        target.write_bytes(lf)
+        (seed / "same-blob").write_bytes(lf)
+        (seed / ".gitattributes").write_text("*.cmd text eol=crlf\n")
+        self.git("add", ".", cwd=seed)
+        self.git("commit", "-qm", "fixture with a Git checkout representation", cwd=seed)
+        self.git("add", "seed")
+        self.git("commit", "-qm", "pin seed checkout")
+        self.pin()
+        target.unlink()
+        self.git("-c", "core.autocrlf=false", "checkout", "HEAD", "--", path, cwd=seed)
+        self.assertEqual(self.git("diff", "--exit-code", "HEAD", "--", cwd=seed), "")
+        self.assertEqual(target.read_bytes(), crlf)
+        commit = self.git("rev-parse", "HEAD", cwd=seed)
+        blob = self.git("rev-parse", "HEAD:" + path, cwd=seed)
+        self.assertEqual(blob, self.git("hash-object", "--stdin", cwd=seed, data=lf))
+        self.assertEqual(blob, self.git("rev-parse", "HEAD:same-blob", cwd=seed))
+        key = "./seed/" + path
+        for pin in (("0" * 40, key, blob), (commit, key, "0" * 40)):
+            with self.subTest(pin=pin), patch.object(source_reader, "_PINNED_CRLF_CHECKOUT", pin):
+                self.assert_rejected()
+        with patch.object(source_reader, "_PINNED_CRLF_CHECKOUT", (commit, key, blob)):
+            self.contract()
+            self.provider_contract()
+            for changed in (lf, b"echo one\r\necho two\n", crlf.replace(b"one", b"uno")):
+                with self.subTest(changed=changed):
+                    target.write_bytes(changed)
+                    self.assert_rejected()
+            target.write_bytes(crlf)
+            target.chmod(0o755)
+            self.assert_rejected()
+            target.chmod(0o644)
+            self.contract()
+            (seed / "same-blob").write_bytes(crlf)
+            self.assert_rejected()
 
     def test_assume_unchanged_cannot_hide_bytes_outside_allowlist(self):
         self.git("update-index", "--assume-unchanged", "nested/other")

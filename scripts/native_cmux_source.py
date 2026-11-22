@@ -18,6 +18,16 @@ import subprocess
 import time
 
 
+# The pinned Ghostty tree's .gitattributes requires CRLF for this one .cmd.
+# Bind the checkout representation to the authenticated commit, path and blob;
+# never consult local attributes, index flags, Git config or external filters.
+_PINNED_CRLF_CHECKOUT = (
+    "ef4f1570d62117ebc51e3b0f07ad4f34032267b6",
+    "./ghostty/example/electron-embed-windows/scripts/start-software-renderer.cmd",
+    "aaa36cb5a01e4f0612fc40ba150aca1d2e7d887d",
+)
+
+
 EXCLUSIONS = [
     "Git metadata and index contents/flags are not tracked-source byte authority",
     "untracked and ignored files, including generated/dependency/build inputs",
@@ -119,7 +129,7 @@ def _source_inventory(source, directory, processes):
         info = path.lstat()
         records[key] = {"type": "directory", "device": info.st_dev, "inode": info.st_ino}
 
-    def tree(repo, path, oid, prefix, depth):
+    def tree(repo, path, oid, prefix, depth, commit_oid):
         require(depth < 128, "Pinned source: excessive tree/gitlink depth")
         bind_directory(path, prefix)
         raw = object_data(repo, "tree", oid)
@@ -138,7 +148,7 @@ def _source_inventory(source, directory, processes):
             position = end + 21
             child, key = path / os.fsdecode(name), prefix + "/" + os.fsdecode(name)
             if mode == b"40000":
-                tree(repo, child, child_oid, key, depth + 1)
+                tree(repo, child, child_oid, key, depth + 1, commit_oid)
             elif mode == b"160000":
                 gitlinks.append({"path": key, "commit": child_oid})
                 checkout(child, child_oid, None, key, depth + 1)
@@ -146,6 +156,10 @@ def _source_inventory(source, directory, processes):
                 require(mode in (b"100644", b"100755", b"120000"),
                         "Pinned source: unsupported tree mode")
                 expected = object_data(repo, "blob", child_oid)
+                if mode == b"100644" and (commit_oid, key, child_oid) == _PINNED_CRLF_CHECKOUT:
+                    # Only the pinned blob (LF-only) is transformed. The file on disk
+                    # must equal the exact CRLF bytes; its bytes are never normalized.
+                    expected = expected.replace(b"\n", b"\r\n")
                 before, proof = identity(child)
                 if mode == b"120000":
                     require(stat.S_ISLNK(before.st_mode), "Pinned source: wrong symlink type: " + key)
@@ -180,7 +194,7 @@ def _source_inventory(source, directory, processes):
         require(re.fullmatch(b"tree [0-9a-f]{40}", first), "Pinned source: malformed commit tree")
         tree_oid = first[5:].decode()
         require(expected_tree is None or tree_oid == expected_tree, "Pinned source: wrong pinned tree")
-        tree(repo, repo, tree_oid, prefix, depth)
+        tree(repo, repo, tree_oid, prefix, depth, commit_oid)
 
     source = Path(source).absolute()
     checkout(source, native.SOURCE_SHA, native.SOURCE_TREE, ".", 0)
